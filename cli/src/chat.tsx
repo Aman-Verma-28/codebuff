@@ -1,4 +1,5 @@
 import { AnalyticsEvent } from '@codebuff/common/constants/analytics-events'
+import type { FeedbackCategory } from '@codebuff/common/constants/feedback'
 import open from 'open'
 import {
   useCallback,
@@ -10,7 +11,7 @@ import {
 } from 'react'
 import { useShallow } from 'zustand/react/shallow'
 
-import { getAdsEnabled } from './commands/ads'
+import { getAdsEnabled, handleAdsDisable } from './commands/ads'
 import { routeUserPrompt, addBashMessageToHistory } from './commands/router'
 import { AdBanner } from './components/ad-banner'
 import { BottomStatusLine } from './components/bottom-status-line'
@@ -162,6 +163,12 @@ export const Chat = ({
 
   const { statusMessage } = useClipboard()
   const { ad } = useGravityAd()
+  const [adsManuallyDisabled, setAdsManuallyDisabled] = useState(false)
+
+  const handleDisableAds = useCallback(() => {
+    handleAdsDisable()
+    setAdsManuallyDisabled(true)
+  }, [])
 
   // Fetch subscription data early - needed for session credits tracking
   const { data: subscriptionData } = useSubscriptionQuery({
@@ -604,7 +611,7 @@ export const Chat = ({
     ],
   )
 
-  const { inputWidth, handleBuildFast, handleBuildMax } = useChatInput({
+  const { inputWidth, handleBuildFast, handleBuildMax, handleBuildFree } = useChatInput({
     setInputValue,
     agentMode,
     setAgentMode,
@@ -617,6 +624,7 @@ export const Chat = ({
 
   const {
     feedbackMode,
+    feedbackText,
     openFeedbackForMessage,
     closeFeedback,
     saveCurrentInput,
@@ -625,6 +633,7 @@ export const Chat = ({
   } = useFeedbackStore(
     useShallow((state) => ({
       feedbackMode: state.feedbackMode,
+      feedbackText: state.feedbackText,
       openFeedbackForMessage: state.openFeedbackForMessage,
       closeFeedback: state.closeFeedback,
       saveCurrentInput: state.saveCurrentInput,
@@ -765,7 +774,7 @@ export const Chat = ({
     (
       id: string | null,
       options?: {
-        category?: string
+        category?: FeedbackCategory
         footerMessage?: string
         errors?: Array<{ id: string; message: string }>
       },
@@ -780,7 +789,7 @@ export const Chat = ({
     (
       id: string,
       options?: {
-        category?: string
+        category?: FeedbackCategory
         footerMessage?: string
         errors?: Array<{ id: string; message: string }>
       },
@@ -881,7 +890,7 @@ export const Chat = ({
     () => ({
       ...createDefaultChatKeyboardState(),
       inputMode,
-      inputValue,
+      inputValue: feedbackMode ? feedbackText : inputValue,
       cursorPosition,
       isStreaming,
       isWaitingForResponse,
@@ -904,6 +913,7 @@ export const Chat = ({
     [
       inputMode,
       inputValue,
+      feedbackText,
       cursorPosition,
       isStreaming,
       isWaitingForResponse,
@@ -932,7 +942,6 @@ export const Chat = ({
       onClearFeedbackInput: () => {
         setFeedbackText('')
         useFeedbackStore.getState().setFeedbackCursor(0)
-        useFeedbackStore.getState().setFeedbackCategory('other')
       },
       onClearInput: () =>
         setInputValue({ text: '', cursorPosition: 0, lastEditDueToNav: false }),
@@ -1221,6 +1230,7 @@ export const Chat = ({
       onToggleCollapsed: handleCollapseToggle,
       onBuildFast: handleBuildFast,
       onBuildMax: handleBuildMax,
+      onBuildFree: handleBuildFree,
       onFeedback: handleMessageFeedback,
       onCloseFeedback: handleCloseFeedback,
     })
@@ -1228,6 +1238,7 @@ export const Chat = ({
     handleCollapseToggle,
     handleBuildFast,
     handleBuildMax,
+    handleBuildFree,
     handleMessageFeedback,
     handleCloseFeedback,
     setMessageBlockCallbacks,
@@ -1432,7 +1443,13 @@ export const Chat = ({
           />
         )}
 
-        {ad && getAdsEnabled() && <AdBanner ad={ad} />}
+        {ad && !adsManuallyDisabled && getAdsEnabled() && (
+          <AdBanner
+            ad={ad}
+            onDisableAds={handleDisableAds}
+            isFreeMode={agentMode === 'FREE'}
+          />
+        )}
 
         {reviewMode ? (
           <ReviewScreen

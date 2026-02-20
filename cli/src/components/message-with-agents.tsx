@@ -22,6 +22,7 @@ import {
 } from '../utils/markdown-renderer'
 
 import type { ChatMessage } from '../types/chat'
+import type { FeedbackCategory } from '@codebuff/common/constants/feedback'
 
 interface AgentChildrenGridProps {
   agentChildren: ChatMessage[]
@@ -105,12 +106,13 @@ export const MessageWithAgents = memo(
         })),
       )
 
-    const { onToggleCollapsed, onBuildFast, onBuildMax, onFeedback, onCloseFeedback } =
+    const { onToggleCollapsed, onBuildFast, onBuildMax, onBuildFree, onFeedback, onCloseFeedback } =
       useMessageBlockStore(
         useShallow((state) => ({
           onToggleCollapsed: state.callbacks.onToggleCollapsed,
           onBuildFast: state.callbacks.onBuildFast,
           onBuildMax: state.callbacks.onBuildMax,
+          onBuildFree: state.callbacks.onBuildFree,
           onFeedback: state.callbacks.onFeedback,
           onCloseFeedback: state.callbacks.onCloseFeedback,
         })),
@@ -119,7 +121,7 @@ export const MessageWithAgents = memo(
     // Memoize onOpenFeedback to prevent unnecessary re-renders
     const onOpenFeedback = useCallback(
       (options?: {
-        category?: string
+        category?: FeedbackCategory
         footerMessage?: string
         errors?: Array<{ id: string; message: string }>
       }) => {
@@ -258,6 +260,7 @@ export const MessageWithAgents = memo(
                   onToggleCollapsed={onToggleCollapsed}
                   onBuildFast={onBuildFast}
                   onBuildMax={onBuildMax}
+                  onBuildFree={onBuildFree}
                   onFeedback={onFeedback}
                   onCloseFeedback={onCloseFeedback}
                   validationErrors={message.validationErrors}
@@ -292,6 +295,7 @@ export const MessageWithAgents = memo(
                 onToggleCollapsed={onToggleCollapsed}
                 onBuildFast={onBuildFast}
                 onBuildMax={onBuildMax}
+                onBuildFree={onBuildFree}
                 onFeedback={onFeedback}
                 onCloseFeedback={onCloseFeedback}
                 validationErrors={message.validationErrors}

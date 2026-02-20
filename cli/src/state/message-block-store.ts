@@ -1,6 +1,8 @@
 import { create } from 'zustand'
 import { immer } from 'zustand/middleware/immer'
 
+import type { FeedbackCategory } from '@codebuff/common/constants/feedback'
+
 import type { ChatMessage } from '../types/chat'
 import type { ChatTheme } from '../types/theme-system'
 import type { MarkdownPalette } from '../utils/markdown-renderer'
@@ -32,10 +34,11 @@ export interface MessageBlockCallbacks {
   onToggleCollapsed: (id: string) => void
   onBuildFast: () => void
   onBuildMax: () => void
+  onBuildFree: () => void
   onFeedback: (
     messageId: string,
     options?: {
-      category?: string
+      category?: FeedbackCategory
       footerMessage?: string
       errors?: Array<{ id: string; message: string }>
     },
@@ -85,6 +88,7 @@ const initialCallbacks: MessageBlockCallbacks = {
   onToggleCollapsed: noop,
   onBuildFast: noop,
   onBuildMax: noop,
+  onBuildFree: noop,
   onFeedback: noopFeedback,
   onCloseFeedback: noop,
 }

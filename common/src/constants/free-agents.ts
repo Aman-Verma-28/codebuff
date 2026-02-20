@@ -18,7 +18,7 @@ export const FREE_COST_MODE = 'free' as const
  */
 export const FREE_MODE_AGENT_MODELS: Record<string, Set<string>> = {
   // Root orchestrator
-  'base2-free': new Set(['x-ai/grok-4.1-fast']),
+  'base2-free': new Set(['minimax/minimax-m2.5']),
 
   // File exploration agents
   'file-picker': new Set(['google/gemini-2.5-flash-lite']),
@@ -33,7 +33,10 @@ export const FREE_MODE_AGENT_MODELS: Record<string, Set<string>> = {
   'commander-lite': new Set(['x-ai/grok-4.1-fast']),
 
   // Editor for free mode
-  'editor-glm': new Set(['z-ai/glm-4.7', 'z-ai/glm-4.6']),
+  'editor-lite': new Set(['minimax/minimax-m2.5']),
+
+  // Code reviewer for free mode
+  'code-reviewer-lite': new Set(['minimax/minimax-m2.5']),
 }
 
 /**

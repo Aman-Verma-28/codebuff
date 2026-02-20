@@ -15,6 +15,8 @@ import { getCliEnv } from '../utils/env'
 import { type MarkdownPalette } from '../utils/markdown-renderer'
 import { formatCwd } from '../utils/path-helpers'
 
+import type { FeedbackCategory } from '@codebuff/common/constants/feedback'
+
 import type {
   ContentBlock,
   ImageAttachment,
@@ -43,13 +45,14 @@ interface MessageBlockProps {
   onToggleCollapsed: (id: string) => void
   onBuildFast: () => void
   onBuildMax: () => void
+  onBuildFree: () => void
   onFeedback?: (messageId: string) => void
   onCloseFeedback?: () => void
   validationErrors?: Array<{ id: string; message: string }>
   /** Runtime error to display in UI but NOT send to LLM */
   userError?: string
   onOpenFeedback?: (options?: {
-    category?: string
+    category?: FeedbackCategory
     footerMessage?: string
     errors?: Array<{ id: string; message: string }>
   }) => void
@@ -116,6 +119,7 @@ export const MessageBlock = memo(({
   onToggleCollapsed,
   onBuildFast,
   onBuildMax,
+  onBuildFree,
   onFeedback,
   onCloseFeedback,
   validationErrors,
@@ -153,6 +157,7 @@ export const MessageBlock = memo(({
       onToggleCollapsed,
       onBuildFast,
       onBuildMax,
+      onBuildFree,
       onFeedback,
       onCloseFeedback,
       validationErrors,
@@ -276,6 +281,7 @@ export const MessageBlock = memo(({
               onToggleCollapsed={onToggleCollapsed}
               onBuildFast={onBuildFast}
               onBuildMax={onBuildMax}
+              onBuildFree={onBuildFree}
               isLastMessage={isLastMessage}
               contentToCopy={isUser ? content : undefined}
             />

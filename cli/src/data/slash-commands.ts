@@ -1,4 +1,5 @@
 import { AGENT_MODES } from '../utils/constants'
+import { CREDITS_REFERRAL_BONUS } from '@codebuff/common/old-constants'
 
 import type { SkillsMap } from '@codebuff/common/types/skill'
 
@@ -37,8 +38,8 @@ export const SLASH_COMMANDS: SlashCommand[] = [
   },
   {
     id: 'connect:claude',
-    label: 'connect:claude',
-    description: 'Connect your Claude Pro/Max subscription',
+    label: 'connect:claude (deprecated)',
+    description: 'Claude subscription will be removed March 1st',
     aliases: ['claude'],
   },
   {
@@ -50,6 +51,12 @@ export const SLASH_COMMANDS: SlashCommand[] = [
     id: 'ads:disable',
     label: 'ads:disable',
     description: 'Disable contextual ads and stop earning credits',
+  },
+  {
+    id: 'refer-friends',
+    label: 'refer-friends',
+    description: `Refer friends for ${CREDITS_REFERRAL_BONUS} bonus credits each`,
+    aliases: ['referral'],
   },
   {
     id: 'init',
@@ -76,13 +83,8 @@ export const SLASH_COMMANDS: SlashCommand[] = [
   {
     id: 'subscribe',
     label: 'subscribe',
-    description: 'Subscribe to Codebuff Strong',
-    aliases: ['strong'],
-  },
-  {
-    id: 'buy-credits',
-    label: 'buy-credits',
-    description: 'Open the usage page to buy credits',
+    description: 'Subscribe to get more usage',
+    aliases: ['strong', 'sub', 'buy-credits'],
   },
   {
     id: 'new',
@@ -132,12 +134,6 @@ export const SLASH_COMMANDS: SlashCommand[] = [
     aliases: ['img', 'attach'],
   },
   ...MODE_COMMANDS,
-  {
-    id: 'referral',
-    label: 'referral',
-    description: 'Redeem a referral code for bonus credits',
-    aliases: ['redeem'],
-  },
   // {
   //   id: 'publish',
   //   label: 'publish',

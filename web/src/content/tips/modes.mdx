@@ -10,17 +10,15 @@ order: 2
 Codebuff has four modes. Switch during a session with `Shift+Tab` or `/mode:` commands.
 
 <MarkdownTable>
-| Mode | Model | Editor Agent | Code Review |
-| --- | --- | --- | --- | --- |
-| Default | Claude Opus 4.5 | editor | Yes |
-| Max | Claude Opus 4.5 | editor-multi-prompt | Yes |
-| Plan | Claude Opus 4.5 | None | No |
-| Free | Grok 4.1 Fast | editor-glm | No |
+  | Mode | Model | Editor Agent | Code Review | | --- | --- | --- | --- | --- |
+  | Default | Claude Opus 4.6 | editor | Yes | | Max | Claude Opus 4.6 |
+  editor-multi-prompt | Yes | | Plan | Claude Opus 4.6 | None | No | | Free |
+  MiniMax M2.5 | editor-lite | No |
 </MarkdownTable>
 
 ## Default
 
-Standard mode with Claude Opus 4.5:
+Standard mode with Claude Opus 4.6:
 
 - Spawns [file pickers](/publishers/codebuff/agents/file-picker) and [code searchers](/publishers/codebuff/agents/code-searcher) to gather context
 - Uses the [`editor`](/publishers/codebuff/agents/editor) agent for code changes
@@ -32,7 +30,7 @@ Switch to this mode with `/mode:default`.
 
 ## Max
 
-Claude Opus 4.5 with best-of-N selection:
+Claude Opus 4.6 with best-of-N selection:
 
 - Reads 12-20+ files per task
 - Spawns multiple [editor](/publishers/codebuff/agents/editor) agents in parallel, each with a different strategy
@@ -60,14 +58,12 @@ Switch to this mode with `/mode:plan`.
 
 ## Free
 
-Grok 4.1 Fast, cheaper and faster:
+MiniMax M2.5, cheaper and faster:
 
 - Less file context gathering
-- Uses GLM 4.7 for code changes ([`editor-glm`](/publishers/codebuff/agents/editor-glm) agent)
 - Skips code review
 - No todo tracking
 
 Good for quick fixes and simple questions.
 
 Switch to this mode with `/mode:free`.
-
