@@ -7,7 +7,7 @@ import {
 import { DEFAULT_FREE_CREDITS_GRANT } from '@codebuff/common/old-constants'
 import { env } from '@codebuff/common/env'
 import { loadStripe } from '@stripe/stripe-js'
-import { Check, Loader2, Sparkles, X } from 'lucide-react'
+import { Check, Loader2, Sparkles } from 'lucide-react'
 import { usePathname, useRouter } from 'next/navigation'
 import { useSession } from 'next-auth/react'
 import { useState } from 'react'
