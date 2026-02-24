@@ -1,13 +1,14 @@
 'use client'
 
-import { Menu, DollarSign, LogIn, BarChart2, BookHeart } from 'lucide-react'
+import { Menu, DollarSign, LogIn, BarChart2, BookHeart, Sparkles } from 'lucide-react'
 import Image from 'next/image'
 import Link from 'next/link'
 import { usePathname } from 'next/navigation'
 import { useSession } from 'next-auth/react'
-
+import { useState } from 'react'
 
 import { UserDropdown } from './user-dropdown'
+import { PricingModal } from '../pricing-modal'
 import { Icons } from '../icons'
 import { Button } from '../ui/button'
 import {
@@ -25,6 +26,7 @@ const HIDDEN_PATHS = ['/subscribe']
 export const Navbar = () => {
   const pathname = usePathname()
   const { data: session, status } = useSession()
+  const [pricingModalOpen, setPricingModalOpen] = useState(false)
 
   if (pathname && HIDDEN_PATHS.includes(pathname)) return null
 
@@ -78,6 +80,16 @@ export const Navbar = () => {
               <span className="relative z-10">Usage</span>
               <span className="pointer-events-none absolute inset-0 rounded-md bg-gradient-to-r from-blue-500/0 via-blue-500/5 to-purple-500/0 opacity-0 group-hover:opacity-100 transition-opacity duration-300" />
             </Link>
+          )}
+          {status !== 'loading' && session && (
+            <button
+              onClick={() => setPricingModalOpen(true)}
+              className="relative font-medium px-3 py-2 rounded-md transition-all duration-200 hover:bg-accent hover:text-accent-foreground group flex items-center gap-1.5"
+            >
+              <Sparkles className="h-4 w-4 text-acid-green" />
+              <span className="relative z-10">Upgrade</span>
+              <span className="pointer-events-none absolute inset-0 rounded-md bg-gradient-to-r from-green-500/0 via-green-500/5 to-emerald-500/0 opacity-0 group-hover:opacity-100 transition-opacity duration-300" />
+            </button>
           )}
         </nav>
         <div className="flex items-center space-x-2 ml-4">
@@ -137,6 +149,15 @@ export const Navbar = () => {
                   </Link>
                 </DropdownMenuItem>
               )}
+              {status !== 'loading' && session && (
+                <DropdownMenuItem
+                  onClick={() => setPricingModalOpen(true)}
+                  className="flex items-center cursor-pointer transition-colors"
+                >
+                  <Sparkles className="mr-2 h-4 w-4 text-acid-green" />
+                  <span>Upgrade</span>
+                </DropdownMenuItem>
+              )}
               {status !== 'loading' && !session && (
                 <DropdownMenuItem asChild>
                   <Link
@@ -182,6 +203,7 @@ export const Navbar = () => {
           {/* <ThemeSwitcher /> */}
         </div>
       </div>
+      <PricingModal open={pricingModalOpen} onOpenChange={setPricingModalOpen} />
     </header>
   )
 }
