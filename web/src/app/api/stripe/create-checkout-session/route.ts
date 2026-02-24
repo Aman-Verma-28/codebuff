@@ -36,6 +36,12 @@ export async function POST(req: NextRequest) {
 
   let priceId = rawPriceId
   const checkoutMode = mode ?? 'subscription'
+  if (checkoutMode !== 'payment' && checkoutMode !== 'subscription') {
+    return NextResponse.json(
+      { error: "Invalid mode. Must be either 'payment' or 'subscription'." },
+      { status: 400 },
+    )
+  }
 
   // If tier is provided instead of priceId, resolve it
   if (!priceId && rawTier) {
