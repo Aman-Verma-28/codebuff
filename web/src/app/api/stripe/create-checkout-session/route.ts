@@ -1,4 +1,4 @@
-import { getPriceIdFromTier } from '@codebuff/billing'
+import { getActiveSubscription, getPriceIdFromTier } from '@codebuff/billing'
 import { SUBSCRIPTION_TIERS } from '@codebuff/common/constants/subscription-plans'
 import db from '@codebuff/internal/db'
 import * as schema from '@codebuff/internal/db/schema'
@@ -76,13 +76,21 @@ export async function POST(req: NextRequest) {
     )
   }
 
+  // Block duplicate subscriptions
+  if (checkoutMode === 'subscription') {
+    const existing = await getActiveSubscription({ userId, logger })
+    if (existing) {
+      return NextResponse.json(
+        { error: 'You already have an active subscription.' },
+        { status: 409 },
+      )
+    }
+  }
+
   try {
-    const successUrl =
-      body.successUrl ??
-      `${env.NEXT_PUBLIC_CODEBUFF_APP_URL}/payment-success?session_id={CHECKOUT_SESSION_ID}`
-    const cancelUrl =
-      body.cancelUrl ??
-      `${env.NEXT_PUBLIC_CODEBUFF_APP_URL}/payment/cancel`
+    // Use server-defined redirect URLs only (no user-controllable redirects)
+    const successUrl = `${env.NEXT_PUBLIC_CODEBUFF_APP_URL}/payment-success?session_id={CHECKOUT_SESSION_ID}`
+    const cancelUrl = `${env.NEXT_PUBLIC_CODEBUFF_APP_URL}/payment/cancel`
 
     const checkoutSession = await stripeServer.checkout.sessions.create({
       customer: user.stripe_customer_id,
