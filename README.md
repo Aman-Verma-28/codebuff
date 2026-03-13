@@ -47,9 +47,9 @@ Then just tell Codebuff what you want and it handles the rest:
 
 Codebuff will find the right files, makes changes across your codebase, and runs tests to make sure nothing breaks.
 
-## Sending Images
+## Sending Images Through the Terminal
 
-Codebuff supports sending images alongside your messages so agents can see screenshots, mockups, error dialogs, or any visual context. There are multiple ways to attach images:
+Codebuff supports sending images alongside your messages directly from the terminal so agents can see screenshots, mockups, error dialogs, or any visual context. There are multiple ways to attach images:
 
 ### Slash command
 
