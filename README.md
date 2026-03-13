@@ -69,10 +69,6 @@ Press **Ctrl+V** anywhere in the chat input to paste an image directly from your
 - **Linux** — images from xclip or wl-paste (X11 and Wayland)
 - **Windows** — clipboard images or files copied in Explorer
 
-### Drag and drop
-
-Drag an image file from your file manager into the terminal. Codebuff detects the file path and attaches it automatically.
-
 ### Inline path detection
 
 Reference image paths directly in your message and Codebuff will detect and attach them:
