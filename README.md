@@ -47,6 +47,78 @@ Then just tell Codebuff what you want and it handles the rest:
 
 Codebuff will find the right files, makes changes across your codebase, and runs tests to make sure nothing breaks.
 
+## Sending Images
+
+Codebuff supports sending images alongside your messages so agents can see screenshots, mockups, error dialogs, or any visual context. There are multiple ways to attach images:
+
+### Slash command
+
+Use the `/image` command to attach an image file by path:
+
+```
+/image ./screenshot.png please fix the layout issue shown here
+```
+
+You can also type `/image` (or `/img`, `/attach`) without a path to enter **image input mode**, which changes the input prompt to accept a file path or a clipboard paste.
+
+### Clipboard paste (Ctrl+V)
+
+Press **Ctrl+V** anywhere in the chat input to paste an image directly from your clipboard. This works cross-platform:
+
+- **macOS** — screenshots (Cmd+Shift+4), copied images, or files copied in Finder
+- **Linux** — images from xclip or wl-paste (X11 and Wayland)
+- **Windows** — clipboard images or files copied in Explorer
+
+### Drag and drop
+
+Drag an image file from your file manager into the terminal. Codebuff detects the file path and attaches it automatically.
+
+### Inline path detection
+
+Reference image paths directly in your message and Codebuff will detect and attach them:
+
+```
+Please compare these two designs: ./before.png and ./after.png
+```
+
+Paths can be absolute (`/home/user/img.png`), relative (`../assets/logo.png`), use `~` (`~/Downloads/screenshot.png`), or use the `@path` syntax (`@./screenshot.png`).
+
+### Supported formats and limits
+
+| Format | Extensions |
+|--------|-----------|
+| JPEG | `.jpg`, `.jpeg` |
+| PNG | `.png` |
+| WebP | `.webp` |
+| GIF | `.gif` |
+| BMP | `.bmp` |
+| TIFF | `.tiff`, `.tif` |
+
+- **Max single file size**: 10 MB (large images are automatically compressed/resized to fit)
+- **Max base64 payload**: 1 MB after compression
+- **Max total image size**: 5 MB across all attached images
+
+Images that exceed the base64 limit are iteratively compressed using different quality and dimension settings. A banner above the input shows attached images with their status (processing, ready, compressed, or error).
+
+### SDK usage
+
+When using the SDK programmatically, pass images via the `content` array in `MessageContent`:
+
+```typescript
+const result = await client.run({
+  agent: 'base',
+  prompt: 'Fix the bug shown in this screenshot',
+  content: [
+    {
+      type: 'image',
+      image: base64EncodedString,
+      mediaType: 'image/png',
+    },
+  ],
+  handleEvent: (event) => console.log(event),
+})
+```
+
 ## Create custom agents
 
 To get started building your own agents, start Codebuff and run the `/init` command:
