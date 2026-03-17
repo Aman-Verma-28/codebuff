@@ -47,6 +47,57 @@ Then just tell Codebuff what you want and it handles the rest:
 
 Codebuff will find the right files, makes changes across your codebase, and runs tests to make sure nothing breaks.
 
+## Image support
+
+Codebuff supports sending images directly in the CLI so the AI can analyze screenshots, UI mockups, error outputs, and more. There are several ways to attach images:
+
+### Slash command
+
+Use the `/image` command to attach an image by file path:
+
+```
+/image ./screenshot.png describe what you see
+```
+
+The path can be absolute or relative to your project root. You can also omit the message and just attach the image:
+
+```
+/image ~/Desktop/error.png
+```
+
+### Clipboard paste
+
+Press **Ctrl+V** to paste an image directly from your clipboard. This works with:
+
+- Screenshots (e.g., `Cmd+Shift+4` on macOS, `PrtScn` on Windows/Linux)
+- Images copied from other applications (browsers, image editors, etc.)
+- Image files copied from your file manager (Finder, Explorer, etc.)
+
+### Drag and drop
+
+Drag an image file from your file manager into the terminal window. Codebuff will detect the file path and attach it automatically.
+
+### Inline path detection
+
+Codebuff auto-detects image paths mentioned in your messages. You can reference images using the `@` prefix or just include a file path:
+
+```
+Please analyze @./mockup.png and implement this design
+Look at ~/Downloads/bug-screenshot.jpg and fix the layout issue
+```
+
+### Supported formats
+
+Codebuff supports **JPEG**, **PNG**, **WebP**, **GIF**, **BMP**, and **TIFF** image formats.
+
+- **Max file size**: 10MB per image (large images are automatically compressed)
+- **Max total size**: 5MB combined for multiple images in a single message
+- Images exceeding size limits are automatically downsampled while preserving aspect ratio
+
+### Terminal image display
+
+For the best experience, use a terminal that supports inline images such as **iTerm2** or **Kitty**. In other terminals, Codebuff displays image metadata (filename, type, size) as a fallback.
+
 ## Create custom agents
 
 To get started building your own agents, start Codebuff and run the `/init` command:
