@@ -47,6 +47,57 @@ Then just tell Codebuff what you want and it handles the rest:
 
 Codebuff will find the right files, makes changes across your codebase, and runs tests to make sure nothing breaks.
 
+## Sending images to Codebuff
+
+Codebuff supports sending images directly in the CLI so the AI can see screenshots, mockups, error messages, or any visual context. There are several ways to attach images:
+
+### Clipboard paste (Ctrl+V)
+
+Copy a screenshot or image to your clipboard, then press **Ctrl+V** in the Codebuff input. This works with:
+- Screenshots (e.g., macOS `Cmd+Shift+4`, Windows `Win+Shift+S`)
+- Images copied from any application
+- Image files copied from Finder/file manager (the file itself is attached)
+
+### File paths in your message
+
+Reference image files directly in your prompt using file paths:
+
+```
+Fix the layout issue shown in ./screenshots/bug.png
+```
+
+Codebuff auto-detects image paths in your message, including:
+- Absolute paths: `/Users/me/screenshots/error.png`
+- Relative paths: `./assets/mockup.png`, `../design/logo.jpg`
+- Home directory paths: `~/Desktop/screenshot.png`
+- `@`-prefixed paths: `@screenshot.png`
+
+### Drag and drop
+
+Drag an image file from your file manager into the terminal window. Codebuff detects the file path and attaches the image automatically.
+
+### Image input mode
+
+Type `/image` to enter image input mode (indicated by a 📎 icon). In this mode you can:
+- Type an image file path and press Enter
+- Press **Ctrl+V** to paste from clipboard
+- Press **Escape** or **Backspace** to exit image mode
+
+### Supported formats and limits
+
+| Format | Extensions |
+|--------|-----------|
+| JPEG | `.jpg`, `.jpeg` |
+| PNG | `.png` |
+| WebP | `.webp` |
+| GIF | `.gif` |
+| BMP | `.bmp` |
+| TIFF | `.tiff`, `.tif` |
+
+- **Max file size**: 10 MB per image (large images are automatically compressed)
+- **Max total size**: 5 MB combined across multiple images
+- Images are displayed as color thumbnails in the terminal before sending
+
 ## Create custom agents
 
 To get started building your own agents, start Codebuff and run the `/init` command:
