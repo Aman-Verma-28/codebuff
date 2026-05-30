@@ -1,6 +1,7 @@
 import { useState } from 'react'
 
 import { Button } from './button'
+import { IS_FREEBUFF } from '../utils/constants'
 import { useTerminalLayout } from '../hooks/use-terminal-layout'
 import { BORDER_CHARS } from '../utils/ui-constants'
 
@@ -10,14 +11,16 @@ export const BuildModeButtons = ({
   theme,
   onBuildFast,
   onBuildMax,
-  onBuildFree,
+  onBuildLite,
 }: {
   theme: ChatTheme
   onBuildFast: () => void
   onBuildMax: () => void
-  onBuildFree: () => void
+  onBuildLite: () => void
 }) => {
-  const [hoveredButton, setHoveredButton] = useState<'fast' | 'max' | 'free' | null>(
+  if (IS_FREEBUFF) return null
+
+  const [hoveredButton, setHoveredButton] = useState<'fast' | 'max' | 'lite' | null>(
     null,
   )
   const { width } = useTerminalLayout()
@@ -90,15 +93,15 @@ export const BuildModeButtons = ({
             paddingRight: 2,
             borderStyle: 'single',
             borderColor:
-              hoveredButton === 'free' ? theme.foreground : theme.secondary,
+              hoveredButton === 'lite' ? theme.foreground : theme.secondary,
             customBorderChars: BORDER_CHARS,
           }}
-          onClick={onBuildFree}
-          onMouseOver={() => setHoveredButton('free')}
+          onClick={onBuildLite}
+          onMouseOver={() => setHoveredButton('lite')}
           onMouseOut={() => setHoveredButton(null)}
         >
           <text wrapMode="none">
-            <span fg={theme.foreground}>Build FREE</span>
+            <span fg={theme.foreground}>Build LITE</span>
           </text>
         </Button>
       </box>

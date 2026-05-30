@@ -13,6 +13,7 @@ import type {
   Logger,
   LoggerWithContextFn,
 } from '@codebuff/common/types/contracts/logger'
+import type { BlockGrantResult } from '@codebuff/billing/subscription'
 
 describe('/api/v1/docs-search POST endpoint', () => {
   let mockLogger: Logger
@@ -40,6 +41,7 @@ describe('/api/v1/docs-search POST endpoint', () => {
         totalDebt: 0,
         netBalance: 10,
         breakdown: {},
+        principals: {},
       },
       nextQuotaReset: 'soon',
     }))
@@ -79,7 +81,9 @@ describe('/api/v1/docs-search POST endpoint', () => {
         headers: { 'Content-Type': 'text/plain' },
       })
     }
-    mockFetch = Object.assign(fetchImpl, { preconnect: () => {} }) as typeof fetch
+    mockFetch = Object.assign(fetchImpl, {
+      preconnect: () => {},
+    }) as typeof fetch
   })
 
   afterEach(() => {
@@ -104,7 +108,7 @@ describe('/api/v1/docs-search POST endpoint', () => {
     expect(res.status).toBe(401)
   })
 
-  test('402 when insufficient credits', async () => {
+  test('200 when zero-credit docs search user has no credits', async () => {
     mockGetUserUsageData = mock(async () => ({
       usageThisCycle: 0,
       balance: {
@@ -112,6 +116,7 @@ describe('/api/v1/docs-search POST endpoint', () => {
         totalDebt: 0,
         netBalance: 0,
         breakdown: {},
+        principals: {},
       },
       nextQuotaReset: 'soon',
     }))
@@ -130,7 +135,11 @@ describe('/api/v1/docs-search POST endpoint', () => {
       consumeCreditsWithFallback: mockConsumeCreditsWithFallback,
       fetch: mockFetch,
     })
-    expect(res.status).toBe(402)
+    expect(res.status).toBe(200)
+    const body = await res.json()
+    expect(body.creditsUsed).toBe(0)
+    expect(mockGetUserUsageData).not.toHaveBeenCalled()
+    expect(mockConsumeCreditsWithFallback).not.toHaveBeenCalled()
   })
 
   test('200 on success', async () => {
@@ -152,5 +161,96 @@ describe('/api/v1/docs-search POST endpoint', () => {
     expect(res.status).toBe(200)
     const body = await res.json()
     expect(body.documentation).toContain('Some documentation text')
+    expect(body.creditsUsed).toBe(0)
+    expect(mockConsumeCreditsWithFallback).not.toHaveBeenCalled()
+  })
+
+  test('200 for subscriber with 0 a-la-carte credits but active block grant', async () => {
+    mockGetUserUsageData = mock(
+      async ({
+        includeSubscriptionCredits,
+      }: {
+        includeSubscriptionCredits?: boolean
+      }) => ({
+        usageThisCycle: 0,
+        balance: {
+          totalRemaining: includeSubscriptionCredits ? 350 : 0,
+          totalDebt: 0,
+          netBalance: includeSubscriptionCredits ? 350 : 0,
+          breakdown: {},
+          principals: {},
+        },
+        nextQuotaReset: 'soon',
+      }),
+    )
+    const mockEnsureSubscriberBlockGrant = mock(async () => ({
+      grantId: 'grant-1',
+      credits: 350,
+      expiresAt: new Date(Date.now() + 5 * 60 * 60 * 1000),
+      isNew: true,
+    })) as unknown as (params: {
+      userId: string
+      logger: Logger
+    }) => Promise<BlockGrantResult | null>
+
+    const req = new NextRequest('http://localhost:3000/api/v1/docs-search', {
+      method: 'POST',
+      headers: { Authorization: 'Bearer valid' },
+      body: JSON.stringify({ libraryTitle: 'React' }),
+    })
+    const res = await postDocsSearch({
+      req,
+      getUserInfoFromApiKey: mockGetUserInfoFromApiKey,
+      logger: mockLogger,
+      loggerWithContext: mockLoggerWithContext,
+      trackEvent: mockTrackEvent,
+      getUserUsageData: mockGetUserUsageData,
+      consumeCreditsWithFallback: mockConsumeCreditsWithFallback,
+      fetch: mockFetch,
+      ensureSubscriberBlockGrant: mockEnsureSubscriberBlockGrant,
+    })
+    expect(res.status).toBe(200)
+  })
+
+  test('200 for non-subscriber with 0 credits and no block grant', async () => {
+    mockGetUserUsageData = mock(async () => ({
+      usageThisCycle: 0,
+      balance: {
+        totalRemaining: 0,
+        totalDebt: 0,
+        netBalance: 0,
+        breakdown: {},
+        principals: {},
+      },
+      nextQuotaReset: 'soon',
+    }))
+    const mockEnsureSubscriberBlockGrant = mock(
+      async () => null,
+    ) as unknown as (params: {
+      userId: string
+      logger: Logger
+    }) => Promise<BlockGrantResult | null>
+
+    const req = new NextRequest('http://localhost:3000/api/v1/docs-search', {
+      method: 'POST',
+      headers: { Authorization: 'Bearer valid' },
+      body: JSON.stringify({ libraryTitle: 'React' }),
+    })
+    const res = await postDocsSearch({
+      req,
+      getUserInfoFromApiKey: mockGetUserInfoFromApiKey,
+      logger: mockLogger,
+      loggerWithContext: mockLoggerWithContext,
+      trackEvent: mockTrackEvent,
+      getUserUsageData: mockGetUserUsageData,
+      consumeCreditsWithFallback: mockConsumeCreditsWithFallback,
+      fetch: mockFetch,
+      ensureSubscriberBlockGrant: mockEnsureSubscriberBlockGrant,
+    })
+    expect(res.status).toBe(200)
+    const body = await res.json()
+    expect(body.creditsUsed).toBe(0)
+    expect(mockGetUserUsageData).not.toHaveBeenCalled()
+    expect(mockConsumeCreditsWithFallback).not.toHaveBeenCalled()
   })
 })

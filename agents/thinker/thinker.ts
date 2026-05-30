@@ -5,10 +5,13 @@ import type { SecretAgentDefinition } from '../types/secret-agent-definition'
 const definition: SecretAgentDefinition = {
   id: 'thinker',
   publisher,
-  model: 'anthropic/claude-opus-4.6',
+  model: 'anthropic/claude-opus-4.7',
+  providerOptions: {
+    only: ['amazon-bedrock'],
+  },
   displayName: 'Theo the Theorizer',
   spawnerPrompt:
-    'Does deep thinking given the current conversation history and a specific prompt to focus on. Use this to help you solve a specific problem. It is better to gather any relevant context before spawning this agent.',
+    'Does deep thinking given the current conversation history and a specific prompt to focus on. Use this to help you solve a specific problem. You must gather any relevant context before spawning this agent because the thinker agent has no access to tools. You can keep the prompt very short, because the thinker agent can see the entire conversation history for context.',
   inputSchema: {
     prompt: {
       type: 'string',
@@ -46,9 +49,8 @@ When satisfied, write out a brief response to the user's request. The parent age
       .find((m) => m.role === 'assistant')
 
     if (!lastAssistantMessage) {
-      const errorMsg = 'Error: No assistant message found in conversation history'
-      // Using console.error because agents run in a sandboxed environment without access to structured logger
-      console.error('Thinker agent:', errorMsg)
+      const errorMsg =
+        'Error: No assistant message found in conversation history'
       yield {
         toolName: 'set_output',
         input: { message: errorMsg },

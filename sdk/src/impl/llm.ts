@@ -1,7 +1,13 @@
 import { AnalyticsEvent } from '@codebuff/common/constants/analytics-events'
+import { isFreeMode } from '@codebuff/common/constants/free-agents'
 import { models, PROFIT_MARGIN } from '@codebuff/common/old-constants'
 import { buildArray } from '@codebuff/common/util/array'
-import { getErrorObject, promptAborted, promptSuccess } from '@codebuff/common/util/error'
+import { normalizeProviderRequestBodyForCacheDebug } from '@codebuff/common/util/cache-debug'
+import {
+  getErrorObject,
+  promptAborted,
+  promptSuccess,
+} from '@codebuff/common/util/error'
 import { convertCbToModelMessages } from '@codebuff/common/util/messages'
 import { isExplicitlyDefinedModel } from '@codebuff/common/util/model-utils'
 import { StopSequenceHandler } from '@codebuff/common/util/stop-sequence'
@@ -16,12 +22,18 @@ import {
   TypeValidationError,
 } from 'ai'
 
-import { getModelForRequest, markClaudeOAuthRateLimited, fetchClaudeOAuthResetTime } from './model-provider'
-import { getValidClaudeOAuthCredentials } from '../credentials'
+import {
+  getModelForRequest,
+  markChatGptOAuthRateLimited,
+} from './model-provider'
+import { refreshChatGptOAuthToken } from '../credentials'
 import { getErrorStatusCode } from '../error-utils'
 
 import type { ModelRequestParams } from './model-provider'
-import type { OpenRouterProviderRoutingOptions } from '@codebuff/common/types/agent-template'
+import type {
+  OpenRouterProviderOptions,
+  OpenRouterProviderRoutingOptions,
+} from '@codebuff/common/types/agent-template'
 import type {
   PromptAiSdkFn,
   PromptAiSdkStreamFn,
@@ -30,7 +42,7 @@ import type {
 } from '@codebuff/common/types/contracts/llm'
 import type { ParamsOf } from '@codebuff/common/types/function-params'
 import type { JSONObject } from '@codebuff/common/types/json'
-import type { OpenRouterProviderOptions } from '@codebuff/internal/openrouter-ai-sdk'
+import type { LanguageModel } from 'ai'
 import type z from 'zod/v4'
 
 // Provider routing documentation: https://openrouter.ai/docs/features/provider-routing
@@ -54,7 +66,7 @@ function calculateUsedCredits(params: { costDollars: number }): number {
   return Math.round(costDollars * (1 + PROFIT_MARGIN) * 100)
 }
 
-function getProviderOptions(params: {
+export function getProviderOptions(params: {
   model: string
   runId: string
   clientSessionId: string
@@ -62,6 +74,8 @@ function getProviderOptions(params: {
   agentProviderOptions?: OpenRouterProviderRoutingOptions
   n?: number
   costMode?: string
+  cacheDebugCorrelation?: string
+  extraCodebuffMetadata?: Record<string, string>
 }): { codebuff: JSONObject } {
   const {
     model,
@@ -71,6 +85,8 @@ function getProviderOptions(params: {
     agentProviderOptions,
     n,
     costMode,
+    cacheDebugCorrelation,
+    extraCodebuffMetadata,
   } = params
 
   let providerConfig: Record<string, any>
@@ -95,10 +111,16 @@ function getProviderOptions(params: {
       ...providerOptions?.codebuff,
       // All values here get appended to the request body
       codebuff_metadata: {
+        // Caller-supplied keys go first so they can't override reserved
+        // identifiers like run_id/client_id/cost_mode that the server trusts.
+        ...(extraCodebuffMetadata ?? {}),
         run_id: runId,
         client_id: clientSessionId,
         ...(n && { n }),
         ...(costMode && { cost_mode: costMode }),
+        ...(cacheDebugCorrelation && {
+          cache_debug_correlation: cacheDebugCorrelation,
+        }),
       },
       provider: providerConfig,
     },
@@ -115,9 +137,9 @@ type OpenRouterUsageAccounting = {
 }
 
 /**
- * Check if an error is a Claude OAuth rate limit error that should trigger fallback.
+ * Check if an error is an OAuth rate limit error that should trigger fallback.
  */
-function isClaudeOAuthRateLimitError(error: unknown): boolean {
+function isOAuthRateLimitError(error: unknown): boolean {
   if (!error || typeof error !== 'object') return false
 
   // Check status code (handles both 'status' from AI SDK and 'statusCode' from our errors)
@@ -134,10 +156,9 @@ function isClaudeOAuthRateLimitError(error: unknown): boolean {
 
   if (message.includes('rate_limit') || message.includes('rate limit'))
     return true
-  if (message.includes('overloaded')) return true
   if (
     responseBody.includes('rate_limit') ||
-    responseBody.includes('overloaded')
+    responseBody.includes('rate limit')
   )
     return true
 
@@ -145,10 +166,10 @@ function isClaudeOAuthRateLimitError(error: unknown): boolean {
 }
 
 /**
- * Check if an error is a Claude OAuth authentication error (expired/invalid token).
+ * Check if an error is an OAuth authentication error (expired/invalid token).
  * This indicates we should try refreshing the token.
  */
-function isClaudeOAuthAuthError(error: unknown): boolean {
+function isOAuthAuthError(error: unknown): boolean {
   if (!error || typeof error !== 'object') return false
 
   // Check status code (handles both 'status' from AI SDK and 'statusCode' from our errors)
@@ -181,13 +202,102 @@ function isClaudeOAuthAuthError(error: unknown): boolean {
   return false
 }
 
+function getModelProvider(model: LanguageModel): string {
+  if (typeof model === 'string') return model
+  return model.provider
+}
+
+function emitCacheDebugProviderRequest(params: {
+  callback?: (params: {
+    provider: string
+    rawBody: unknown
+    normalizedBody?: unknown
+  }) => void
+  provider: string
+  rawBody: unknown
+}) {
+  if (!params.callback) return
+
+  const normalized = normalizeProviderRequestBodyForCacheDebug({
+    provider: params.provider,
+    body: params.rawBody,
+  })
+
+  params.callback({
+    provider: params.provider,
+    rawBody: params.rawBody,
+    normalizedBody: normalized,
+  })
+}
+
+function emitCacheDebugUsage(params: {
+  callback?: (usage: {
+    inputTokens: number
+    outputTokens: number
+    cachedInputTokens: number
+    totalTokens: number
+  }) => void
+  usage: {
+    inputTokens?: number
+    outputTokens?: number
+    totalTokens?: number
+    cachedInputTokens?: number
+  }
+}) {
+  if (!params.callback) return
+
+  params.callback({
+    inputTokens: params.usage.inputTokens ?? 0,
+    outputTokens: params.usage.outputTokens ?? 0,
+    cachedInputTokens: params.usage.cachedInputTokens ?? 0,
+    totalTokens: params.usage.totalTokens ?? 0,
+  })
+}
+
+export type ChatGptOAuthStreamErrorPolicy =
+  | 'fallback-rate-limit'
+  | 'fail-auth-reconnect'
+  | 'fail-fast'
+  | 'ignore'
+
+export function classifyChatGptOAuthStreamError(params: {
+  isChatGptOAuth: boolean
+  skipChatGptOAuth?: boolean
+  hasYieldedContent: boolean
+  error: unknown
+}): ChatGptOAuthStreamErrorPolicy {
+  const { isChatGptOAuth, skipChatGptOAuth, hasYieldedContent, error } = params
+
+  if (!isChatGptOAuth || skipChatGptOAuth || hasYieldedContent) {
+    return 'ignore'
+  }
+
+  if (isOAuthRateLimitError(error)) {
+    return 'fallback-rate-limit'
+  }
+
+  if (isOAuthAuthError(error)) {
+    return 'fail-auth-reconnect'
+  }
+
+  return 'fail-fast'
+}
+
 export async function* promptAiSdkStream(
   params: ParamsOf<PromptAiSdkStreamFn> & {
-    skipClaudeOAuth?: boolean
-    onClaudeOAuthStatusChange?: (isActive: boolean) => void
+    skipChatGptOAuth?: boolean
+    chatGptOAuthRetried?: boolean
   },
 ): ReturnType<PromptAiSdkStreamFn> {
-  const { logger, trackEvent, userId, userInputId, model: requestedModel } = params
+  const { providerOptions: originalProviderOptions, ...streamParams } = params
+
+  const {
+    logger,
+    trackEvent,
+    userId,
+    userInputId,
+    model: requestedModel,
+  } = params
   const agentChunkMetadata =
     params.agentId != null ? { agentId: params.agentId } : undefined
 
@@ -205,14 +315,15 @@ export async function* promptAiSdkStream(
   const modelParams: ModelRequestParams = {
     apiKey: params.apiKey,
     model: params.model,
-    skipClaudeOAuth: params.skipClaudeOAuth,
+    skipChatGptOAuth: params.skipChatGptOAuth,
+    costMode: params.costMode,
   }
-  const { model: aiSDKModel, isClaudeOAuth } = await getModelForRequest(modelParams)
+  const { model: aiSDKModel, isChatGptOAuth } =
+    await getModelForRequest(modelParams)
 
-  // Track and notify about Claude OAuth usage
-  if (isClaudeOAuth) {
+  if (isChatGptOAuth) {
     trackEvent({
-      event: AnalyticsEvent.CLAUDE_OAUTH_REQUEST,
+      event: AnalyticsEvent.CHATGPT_OAUTH_REQUEST,
       userId: userId ?? '',
       properties: {
         model: requestedModel,
@@ -220,23 +331,24 @@ export async function* promptAiSdkStream(
       },
       logger,
     })
-    if (params.onClaudeOAuthStatusChange) {
-      params.onClaudeOAuthStatusChange(true)
-    }
   }
 
   const response = streamText({
-    ...params,
+    ...streamParams,
     prompt: undefined,
     model: aiSDKModel,
     messages: convertCbToModelMessages(params),
-    // When using Claude OAuth, disable retries so we can immediately fall back to Codebuff
-    // backend on rate limit errors instead of retrying 4 times first
-    ...(isClaudeOAuth && { maxRetries: 0 }),
-    providerOptions: getProviderOptions({
-      ...params,
-      agentProviderOptions: params.agentProviderOptions,
-    }),
+    ...(isChatGptOAuth && { maxRetries: 0 }),
+    // For ChatGPT OAuth direct, don't send codebuff metadata/provider options to OpenAI
+    ...(isChatGptOAuth
+      ? {}
+      : {
+          providerOptions: getProviderOptions({
+            ...params,
+            providerOptions: originalProviderOptions,
+            agentProviderOptions: params.agentProviderOptions,
+          }),
+        }),
     // Handle tool call errors gracefully by passing them through to our validation layer
     // instead of throwing (which would halt the agent). The only special case is when
     // the tool name matches a spawnable agent - transform those to spawn_agents calls.
@@ -405,20 +517,25 @@ export async function* promptAiSdkStream(
         continue
       }
 
-      // Check if this is a Claude OAuth rate limit error - only fall back if no content yielded yet
-      if (
-        isClaudeOAuth &&
-        !params.skipClaudeOAuth &&
-        !hasYieldedContent &&
-        isClaudeOAuthRateLimitError(chunkValue.error)
-      ) {
-        logger.info(
+      const chatGptErrorPolicy = classifyChatGptOAuthStreamError({
+        isChatGptOAuth,
+        skipChatGptOAuth: params.skipChatGptOAuth,
+        hasYieldedContent,
+        error: chunkValue.error,
+      })
+
+      if (chatGptErrorPolicy === 'fallback-rate-limit') {
+        const rateLimitErrorDetails =
+          chunkValue.error instanceof Error
+            ? chunkValue.error.message
+            : String(chunkValue.error)
+        logger.warn(
           { error: getErrorObject(chunkValue.error) },
-          'Claude OAuth rate limited during stream, falling back to Codebuff backend',
+          'ChatGPT OAuth rate limited during stream',
         )
-        // Track the rate limit event
+
         trackEvent({
-          event: AnalyticsEvent.CLAUDE_OAUTH_RATE_LIMITED,
+          event: AnalyticsEvent.CHATGPT_OAUTH_RATE_LIMITED,
           userId: userId ?? '',
           properties: {
             model: requestedModel,
@@ -426,38 +543,31 @@ export async function* promptAiSdkStream(
           },
           logger,
         })
-        // Try to get the actual reset time from the quota API, fall back to default cooldown
-        const credentials = await getValidClaudeOAuthCredentials()
-        const resetTime = credentials?.accessToken 
-          ? await fetchClaudeOAuthResetTime(credentials.accessToken)
-          : null
-        // Mark as rate-limited so subsequent requests skip Claude OAuth
-        markClaudeOAuthRateLimited(resetTime ?? undefined)
-        if (params.onClaudeOAuthStatusChange) {
-          params.onClaudeOAuthStatusChange(false)
+
+        markChatGptOAuthRateLimited()
+
+        // In free mode, don't fall back to Codebuff backend — fail instead
+        if (isFreeMode(params.costMode)) {
+          throw new Error(
+            `ChatGPT rate limit reached. Please wait a few minutes and try again. (${rateLimitErrorDetails})`,
+          )
         }
-        // Retry with Codebuff backend
+
         const fallbackResult = yield* promptAiSdkStream({
           ...params,
-          skipClaudeOAuth: true,
+          skipChatGptOAuth: true,
         })
         return fallbackResult
       }
 
-      // Check if this is a Claude OAuth authentication error (expired token) - only fall back if no content yielded yet
-      if (
-        isClaudeOAuth &&
-        !params.skipClaudeOAuth &&
-        !hasYieldedContent &&
-        isClaudeOAuthAuthError(chunkValue.error)
-      ) {
+      if (chatGptErrorPolicy === 'fail-auth-reconnect') {
         logger.info(
           { error: getErrorObject(chunkValue.error) },
-          'Claude OAuth auth error during stream, falling back to Codebuff backend',
+          'ChatGPT OAuth auth error during stream, attempting token refresh',
         )
-        // Track the auth error event
+
         trackEvent({
-          event: AnalyticsEvent.CLAUDE_OAUTH_AUTH_ERROR,
+          event: AnalyticsEvent.CHATGPT_OAUTH_AUTH_ERROR,
           userId: userId ?? '',
           properties: {
             model: requestedModel,
@@ -465,13 +575,39 @@ export async function* promptAiSdkStream(
           },
           logger,
         })
-        if (params.onClaudeOAuthStatusChange) {
-          params.onClaudeOAuthStatusChange(false)
+
+        // Try refreshing the token and retrying once before failing/falling back
+        if (!params.chatGptOAuthRetried) {
+          const refreshed = await refreshChatGptOAuthToken()
+          if (refreshed) {
+            logger.info(
+              { model: requestedModel },
+              'ChatGPT OAuth token refreshed, retrying request',
+            )
+            const retryResult = yield* promptAiSdkStream({
+              ...params,
+              chatGptOAuthRetried: true,
+            })
+            return retryResult
+          }
+          logger.warn(
+            { model: requestedModel },
+            'ChatGPT OAuth token refresh failed, unable to recover',
+          )
         }
-        // Retry with Codebuff backend (skipClaudeOAuth will bypass the failed OAuth)
+
+        // Refresh failed or already retried
+        // In free mode, don't fall back to Codebuff backend — fail instead
+        if (isFreeMode(params.costMode)) {
+          throw new Error(
+            'ChatGPT OAuth authentication failed. Please reconnect with /connect:chatgpt and try again.',
+          )
+        }
+
+        // Fall back to Codebuff backend
         const fallbackResult = yield* promptAiSdkStream({
           ...params,
-          skipClaudeOAuth: true,
+          skipChatGptOAuth: true,
         })
         return fallbackResult
       }
@@ -489,20 +625,16 @@ export async function* promptAiSdkStream(
       throw chunkValue.error
     }
     if (chunkValue.type === 'reasoning-delta') {
-      for (const provider of ['openrouter', 'codebuff'] as const) {
-        if (
-          (
-            params.providerOptions?.[provider] as
-              | OpenRouterProviderOptions
-              | undefined
-          )?.reasoning?.exclude
-        ) {
-          continue
+      const reasoningExcluded = (['openrouter', 'codebuff'] as const).some(
+        (p) =>
+          (params.providerOptions?.[p] as OpenRouterProviderOptions | undefined)
+            ?.reasoning?.exclude,
+      )
+      if (!reasoningExcluded) {
+        yield {
+          type: 'reasoning',
+          text: chunkValue.text,
         }
-      }
-      yield {
-        type: 'reasoning',
-        text: chunkValue.text,
       }
     }
     if (chunkValue.type === 'text-delta') {
@@ -544,8 +676,21 @@ export async function* promptAiSdkStream(
   const responseValue = await response.response
   const messageId = responseValue.id
 
-  // Skip cost tracking for Claude OAuth (user is on their own subscription)
-  if (!isClaudeOAuth) {
+  const requestMetadata = await response.request
+  emitCacheDebugProviderRequest({
+    callback: params.onCacheDebugProviderRequestBuilt,
+    provider: getModelProvider(aiSDKModel),
+    rawBody: requestMetadata.body,
+  })
+
+  const usageResult = await response.usage
+  emitCacheDebugUsage({
+    callback: params.onCacheDebugUsageReceived,
+    usage: usageResult,
+  })
+
+  // Skip cost tracking for ChatGPT OAuth (user is on their own subscription)
+  if (!isChatGptOAuth) {
     const providerMetadataResult = await response.providerMetadata
     const providerMetadata = providerMetadataResult ?? {}
 
@@ -591,7 +736,7 @@ export async function promptAiSdk(
   const modelParams: ModelRequestParams = {
     apiKey: params.apiKey,
     model: params.model,
-    skipClaudeOAuth: true, // Always use Codebuff backend for non-streaming
+    skipChatGptOAuth: true, // Always use Codebuff backend for non-streaming
   }
   const { model: aiSDKModel } = await getModelForRequest(modelParams)
 
@@ -603,7 +748,17 @@ export async function promptAiSdk(
     providerOptions: getProviderOptions({
       ...params,
       agentProviderOptions: params.agentProviderOptions,
+      cacheDebugCorrelation: params.cacheDebugCorrelation,
     }),
+  })
+  emitCacheDebugProviderRequest({
+    callback: params.onCacheDebugProviderRequestBuilt,
+    provider: getModelProvider(aiSDKModel),
+    rawBody: response.request?.body,
+  })
+  emitCacheDebugUsage({
+    callback: params.onCacheDebugUsageReceived,
+    usage: response.usage,
   })
   const content = response.text
 
@@ -648,7 +803,7 @@ export async function promptAiSdkStructured<T>(
   const modelParams: ModelRequestParams = {
     apiKey: params.apiKey,
     model: params.model,
-    skipClaudeOAuth: true, // Always use Codebuff backend for non-streaming
+    skipChatGptOAuth: true, // Always use Codebuff backend for non-streaming
   }
   const { model: aiSDKModel } = await getModelForRequest(modelParams)
 
@@ -661,7 +816,18 @@ export async function promptAiSdkStructured<T>(
     providerOptions: getProviderOptions({
       ...params,
       agentProviderOptions: params.agentProviderOptions,
+      cacheDebugCorrelation: params.cacheDebugCorrelation,
     }),
+  })
+
+  emitCacheDebugProviderRequest({
+    callback: params.onCacheDebugProviderRequestBuilt,
+    provider: getModelProvider(aiSDKModel),
+    rawBody: response.request?.body,
+  })
+  emitCacheDebugUsage({
+    callback: params.onCacheDebugUsageReceived,
+    usage: response.usage,
   })
 
   const content = response.object

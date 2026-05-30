@@ -64,7 +64,10 @@ Be extremely concise.`,
 const definition: SecretAgentDefinition = {
   id: 'code-reviewer',
   publisher,
-  ...createReviewer('anthropic/claude-opus-4.6'),
+  ...createReviewer('anthropic/claude-opus-4.7'),
+  providerOptions: {
+    only: ['amazon-bedrock'],
+  },
 }
 
 export default definition

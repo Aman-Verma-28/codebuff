@@ -39,7 +39,7 @@ interface ToolResultEvent {
     type: 'json'
     value: Array<{
       agentName: string
-      value: string
+      value: any
     }>
   }>
 }
@@ -212,6 +212,123 @@ describe('sdk-event-handlers', () => {
     expect(getStreamingAgents().has('tool-1-0')).toBe(false)
   })
 
+  test('matches underscore direct-tool aliases to hyphenated agent ids', () => {
+    const { ctx, getMessages, getStreamingAgents } = createTestContext()
+    const handleEvent = createEventHandler(ctx)
+    const handleChunk = createStreamChunkHandler(ctx)
+
+    handleEvent({
+      type: 'tool_call',
+      toolCallId: 'tool-1',
+      toolName: 'spawn_agents',
+      input: {
+        agents: [
+          {
+            agent_type: 'code_reviewer_lite',
+            prompt: 'Review this change',
+          },
+        ],
+      },
+      agentId: 'main-agent',
+      parentAgentId: undefined,
+    } as any)
+
+    handleEvent({
+      type: 'subagent_start',
+      agentId: 'agent-real',
+      agentType: 'code-reviewer-lite',
+      displayName: 'Code Reviewer Lite',
+      onlyChild: true,
+      parentAgentId: undefined,
+      params: undefined,
+      prompt: 'Review this change',
+    })
+
+    handleChunk({
+      type: 'subagent_chunk',
+      agentId: 'agent-real',
+      agentType: 'code-reviewer-lite',
+      chunk: 'streamed review',
+    })
+
+    handleEvent({
+      type: 'subagent_finish',
+      agentId: 'agent-real',
+      agentType: 'code-reviewer-lite',
+      displayName: 'Code Reviewer Lite',
+      onlyChild: true,
+      parentAgentId: undefined,
+      params: undefined,
+      prompt: 'Review this change',
+    })
+
+    handleEvent({
+      type: 'tool_result',
+      toolCallId: 'tool-1',
+      toolName: 'spawn_agents',
+      output: [
+        {
+          type: 'json',
+          value: [
+            {
+              agentName: 'code-reviewer-lite',
+              agentType: 'code-reviewer-lite',
+              value: 'streamed review',
+            },
+          ],
+        },
+      ],
+    } as any)
+
+    const blocks = getMessages()[0].blocks ?? []
+    expect(blocks).toHaveLength(1)
+    const agentBlock = blocks[0] as AgentContentBlock
+    expect(agentBlock.agentId).toBe('agent-real')
+    expect(agentBlock.agentName).toBe('code-reviewer-lite')
+    expect(agentBlock.agentType).toBe('code-reviewer-lite')
+    expect(agentBlock.status).toBe('complete')
+    expect(agentBlock.blocks).toHaveLength(1)
+    expect(agentBlock.blocks?.[0]).toMatchObject({
+      type: 'text',
+      content: 'streamed review',
+    })
+    expect(getStreamingAgents().size).toBe(0)
+  })
+
+  test('preserves spawn_agents params on placeholder agent blocks', () => {
+    const { ctx, getMessages, getStreamingAgents } = createTestContext()
+    const handleEvent = createEventHandler(ctx)
+
+    handleEvent({
+      type: 'tool_call',
+      toolCallId: 'tool-1',
+      toolName: 'spawn_agents',
+      input: {
+        agents: [
+          {
+            agent_type: 'basher',
+            params: {
+              command: 'git status --short',
+              what_to_summarize: 'Report whether the worktree is clean',
+            },
+          },
+        ],
+      },
+      agentId: 'main-agent',
+      parentAgentId: undefined,
+    } as any)
+
+    const agentBlock = (getMessages()[0].blocks ?? [])[0] as AgentContentBlock
+    expect(agentBlock.agentId).toBe('tool-1-0')
+    expect(agentBlock.agentType).toBe('basher')
+    expect(agentBlock.initialPrompt).toBe('')
+    expect(agentBlock.params).toEqual({
+      command: 'git status --short',
+      what_to_summarize: 'Report whether the worktree is clean',
+    })
+    expect(getStreamingAgents().has('tool-1-0')).toBe(true)
+  })
+
   test('handles spawn_agents tool results and clears streaming agents', () => {
     const { ctx, getMessages, getStreamingAgents } = createTestContext()
     ctx.message.updater.addBlock(
@@ -248,6 +365,242 @@ describe('sdk-event-handlers', () => {
     expect(agentBlock.blocks?.[0]).toMatchObject({
       type: 'text',
       content: 'child result',
+    })
+    expect(getStreamingAgents().size).toBe(0)
+  })
+
+  test('hides spawn_agents error placeholders with no user-facing output', () => {
+    const { ctx, getMessages, getStreamingAgents } = createTestContext()
+    ctx.message.updater.addBlock(
+      createAgentBlock({
+        agentId: 'tool-1-0',
+        agentType: 'basher',
+        spawnToolCallId: 'tool-1',
+        spawnIndex: 0,
+      }),
+    )
+    ctx.streaming.setStreamingAgents(() => new Set(['tool-1-0']))
+
+    const handleEvent = createEventHandler(ctx)
+    const toolResultEvent: ToolResultEvent = {
+      type: 'tool_result',
+      toolCallId: 'tool-1',
+      toolName: 'spawn_agents',
+      output: [
+        {
+          type: 'json',
+          value: [
+            {
+              agentName: 'basher',
+              value: {
+                errorMessage:
+                  'Error spawning agent: Invalid params for agent basher',
+              },
+            },
+          ],
+        },
+      ],
+    }
+    handleEvent(toolResultEvent)
+
+    expect(getMessages()[0].blocks).toEqual([])
+    expect(getStreamingAgents().size).toBe(0)
+  })
+
+  test('renders spawn_agents error content when agent already streamed output', () => {
+    const { ctx, getMessages, getStreamingAgents } = createTestContext()
+    ctx.message.updater.updateAiMessageBlocks(() => [
+      {
+        type: 'agent',
+        agentId: 'tool-1-0',
+        agentName: 'Basher',
+        agentType: 'basher',
+        content: '',
+        status: 'running',
+        blocks: [
+          {
+            type: 'text',
+            content: 'Checking files...',
+            textType: 'text',
+          },
+        ],
+        initialPrompt: '',
+        spawnToolCallId: 'tool-1',
+        spawnIndex: 0,
+      } as any,
+    ])
+    ctx.streaming.setStreamingAgents(() => new Set(['tool-1-0']))
+
+    const handleEvent = createEventHandler(ctx)
+    const toolResultEvent: ToolResultEvent = {
+      type: 'tool_result',
+      toolCallId: 'tool-1',
+      toolName: 'spawn_agents',
+      output: [
+        {
+          type: 'json',
+          value: [
+            {
+              agentName: 'basher',
+              value: {
+                errorMessage:
+                  'Error spawning agent: Invalid params for agent basher',
+              },
+            },
+          ],
+        },
+      ],
+    }
+    handleEvent(toolResultEvent)
+
+    const agentBlock = (getMessages()[0].blocks ?? [])[0] as AgentContentBlock
+    expect(agentBlock.status).toBe('complete')
+    expect(agentBlock.blocks).toHaveLength(2)
+    expect(agentBlock.blocks?.[0]).toMatchObject({
+      type: 'text',
+      content: 'Checking files...',
+    })
+    expect(agentBlock.blocks?.[1]).toMatchObject({
+      type: 'text',
+      content: 'Error spawning agent: Invalid params for agent basher',
+    })
+    expect(getStreamingAgents().size).toBe(0)
+  })
+
+  test('handles spawn_agents tool results for agents with tool blocks (lastMessage mode)', () => {
+    const { ctx, getMessages, getStreamingAgents } = createTestContext()
+
+    // Create an agent block with an existing tool block (simulating thinker agent's read_files)
+    ctx.message.updater.updateAiMessageBlocks(() => [
+      {
+        type: 'agent',
+        agentId: 'tool-1-0',
+        agentName: 'Thinker',
+        agentType: 'thinker-with-files-gemini',
+        content: '',
+        status: 'running',
+        blocks: [
+          {
+            type: 'tool',
+            toolCallId: 'read-1',
+            toolName: 'read_files',
+            input: { paths: ['package.json'] },
+            output: 'package contents',
+          },
+        ],
+        initialPrompt: 'Think about this',
+        spawnToolCallId: 'tool-1',
+        spawnIndex: 0,
+      } as any,
+    ])
+    ctx.streaming.setStreamingAgents(() => new Set(['tool-1-0']))
+
+    const handleEvent = createEventHandler(ctx)
+    const toolResultEvent: ToolResultEvent = {
+      type: 'tool_result',
+      toolCallId: 'tool-1',
+      toolName: 'spawn_agents',
+      output: [
+        {
+          type: 'json',
+          value: [
+            {
+              agentName: 'thinker-with-files-gemini',
+              value: {
+                type: 'lastMessage',
+                value: [
+                  {
+                    role: 'assistant',
+                    content: [
+                      { type: 'text', text: 'Here is the analysis result.' },
+                    ],
+                  },
+                ],
+              },
+            },
+          ],
+        },
+      ],
+    }
+    handleEvent(toolResultEvent)
+
+    const agentBlock = (getMessages()[0].blocks ?? [])[0] as AgentContentBlock
+    expect(agentBlock.status).toBe('complete')
+    // Should have the tool block AND the final text content
+    expect(agentBlock.blocks).toHaveLength(2)
+    expect(agentBlock.blocks?.[0]).toMatchObject({
+      type: 'tool',
+      toolName: 'read_files',
+    })
+    expect(agentBlock.blocks?.[1]).toMatchObject({
+      type: 'text',
+      content: 'Here is the analysis result.',
+    })
+    expect(getStreamingAgents().size).toBe(0)
+  })
+
+  test('preserves streamed text content and skips duplicate final content', () => {
+    const { ctx, getMessages, getStreamingAgents } = createTestContext()
+
+    // Create an agent block with existing text blocks (simulating streamed output like basher)
+    ctx.message.updater.updateAiMessageBlocks(() => [
+      {
+        type: 'agent',
+        agentId: 'tool-1-0',
+        agentName: 'Basher',
+        agentType: 'basher',
+        content: '',
+        status: 'running',
+        blocks: [
+          {
+            type: 'text',
+            content: 'Streamed output from basher',
+            textType: 'text',
+          },
+        ],
+        initialPrompt: 'Run a command',
+        spawnToolCallId: 'tool-1',
+        spawnIndex: 0,
+      } as any,
+    ])
+    ctx.streaming.setStreamingAgents(() => new Set(['tool-1-0']))
+
+    const handleEvent = createEventHandler(ctx)
+    const toolResultEvent: ToolResultEvent = {
+      type: 'tool_result',
+      toolCallId: 'tool-1',
+      toolName: 'spawn_agents',
+      output: [
+        {
+          type: 'json',
+          value: [
+            {
+              agentName: 'basher',
+              value: {
+                type: 'lastMessage',
+                value: [
+                  {
+                    role: 'assistant',
+                    content: [
+                      { type: 'text', text: 'Streamed output from basher' },
+                    ],
+                  },
+                ],
+              },
+            },
+          ],
+        },
+      ],
+    }
+    handleEvent(toolResultEvent)
+
+    const agentBlock = (getMessages()[0].blocks ?? [])[0] as AgentContentBlock
+    expect(agentBlock.status).toBe('complete')
+    // Should NOT duplicate the streamed text — only the original text block
+    expect(agentBlock.blocks).toHaveLength(1)
+    expect(agentBlock.blocks?.[0]).toMatchObject({
+      type: 'text',
+      content: 'Streamed output from basher',
     })
     expect(getStreamingAgents().size).toBe(0)
   })

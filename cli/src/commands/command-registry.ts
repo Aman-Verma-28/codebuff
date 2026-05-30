@@ -1,19 +1,21 @@
-import open from 'open'
+import { CHATGPT_OAUTH_ENABLED } from '@codebuff/common/constants/chatgpt-oauth'
+import { safeOpen } from '../utils/open-url'
 
 import { handleAdsEnable, handleAdsDisable } from './ads'
-import { useThemeStore } from '../hooks/use-theme'
 import { handleHelpCommand } from './help'
 import { handleImageCommand } from './image'
 import { handleInitializationFlowLocally } from './init'
-import { handleReferralCode } from './referral'
+import { buildInterviewPrompt, buildPlanPrompt, buildReviewPromptFromArgs } from './prompt-builders'
 import { runBashCommand } from './router'
-import { normalizeReferralCode } from './router-utils'
 import { handleUsageCommand } from './usage'
+import { returnToFreebuffLanding } from '../hooks/use-freebuff-session'
+import { useThemeStore } from '../hooks/use-theme'
 import { WEBSITE_URL } from '../login/constants'
 import { useChatStore } from '../state/chat-store'
 import { useFeedbackStore } from '../state/feedback-store'
 import { useLoginStore } from '../state/login-store'
-import { AGENT_MODES } from '../utils/constants'
+import { getChatGptOAuthStatus } from '../utils/chatgpt-oauth'
+import { AGENT_MODES, END_SESSION_MESSAGE, IS_FREEBUFF } from '../utils/constants'
 import { getSystemMessage, getUserMessage } from '../utils/message-history'
 import { capturePendingAttachments } from '../utils/pending-attachments'
 import { getSkillByName } from '../utils/skill-registry'
@@ -162,7 +164,23 @@ const clearInput = (params: RouterParams) => {
   params.setInputValue({ text: '', cursorPosition: 0, lastEditDueToNav: false })
 }
 
-export const COMMAND_REGISTRY: CommandDefinition[] = [
+const FREEBUFF_REMOVED_COMMANDS = new Set([
+  'ads:enable',
+  'ads:disable',
+  'usage',
+  'subscribe',
+  'image',
+  'publish',
+  'gpt-5-agent',
+])
+
+const FREEBUFF_ONLY_COMMANDS = new Set([
+  'connect',
+  'plan',
+  'end-session',
+])
+
+const ALL_COMMANDS: CommandDefinition[] = [
   defineCommand({
     name: 'ads:enable',
     handler: (params) => {
@@ -225,42 +243,6 @@ export const COMMAND_REGISTRY: CommandDefinition[] = [
 
       // Otherwise enter bash mode
       useChatStore.getState().setInputMode('bash')
-      params.saveToHistory(params.inputValue.trim())
-      clearInput(params)
-    },
-  }),
-  defineCommandWithArgs({
-    name: 'refer-friends',
-    aliases: ['referral', 'redeem'],
-    handler: async (params, args) => {
-      const trimmedArgs = args.trim()
-
-      // If user provided a code directly, redeem it immediately
-      if (trimmedArgs) {
-        const code = normalizeReferralCode(trimmedArgs)
-        try {
-          const { postUserMessage } = await handleReferralCode(code)
-          params.setMessages((prev) => [
-            ...prev,
-            getUserMessage(params.inputValue.trim()),
-            ...postUserMessage([]),
-          ])
-        } catch (error) {
-          const errorMessage =
-            error instanceof Error ? error.message : 'Unknown error'
-          params.setMessages((prev) => [
-            ...prev,
-            getUserMessage(params.inputValue.trim()),
-            getSystemMessage(`Error redeeming referral code: ${errorMessage}`),
-          ])
-        }
-        params.saveToHistory(params.inputValue.trim())
-        clearInput(params)
-        return
-      }
-
-      // Otherwise enter referral mode
-      useChatStore.getState().setInputMode('referral')
       params.saveToHistory(params.inputValue.trim())
       clearInput(params)
     },
@@ -386,7 +368,7 @@ export const COMMAND_REGISTRY: CommandDefinition[] = [
     name: 'subscribe',
     aliases: ['strong', 'sub', 'buy-credits'],
     handler: (params) => {
-      open(WEBSITE_URL + '/subscribe')
+      safeOpen(WEBSITE_URL + '/subscribe')
       clearInput(params)
     },
   }),
@@ -410,10 +392,11 @@ export const COMMAND_REGISTRY: CommandDefinition[] = [
       clearInput(params)
     },
   }),
-  // Mode commands generated from AGENT_MODES
-  ...AGENT_MODES.map((mode) =>
+  // Mode commands generated from AGENT_MODES (excluded in Freebuff)
+  ...(IS_FREEBUFF ? [] : AGENT_MODES).map((mode) =>
     defineCommandWithArgs({
       name: `mode:${mode.toLowerCase()}`,
+      aliases: [`model:${mode.toLowerCase()}`],
       handler: (params, args) => {
         const trimmedArgs = args.trim()
 
@@ -470,16 +453,19 @@ export const COMMAND_REGISTRY: CommandDefinition[] = [
       // Don't save to history - this is just a UI shortcut
     },
   }),
-  defineCommand({
-    name: 'connect:claude',
-    aliases: ['claude'],
-    handler: (params) => {
-      // Enter connect:claude mode to show the OAuth banner
-      useChatStore.getState().setInputMode('connect:claude')
-      params.saveToHistory(params.inputValue.trim())
-      clearInput(params)
-    },
-  }),
+  ...(CHATGPT_OAUTH_ENABLED
+    ? [
+        defineCommand({
+          name: 'connect',
+          aliases: ['connect:chatgpt', 'chatgpt'],
+          handler: (params) => {
+            useChatStore.getState().setInputMode('connect:chatgpt')
+            params.saveToHistory(params.inputValue.trim())
+            clearInput(params)
+          },
+        }),
+      ]
+    : []),
   defineCommand({
     name: 'history',
     aliases: ['chats'],
@@ -490,8 +476,86 @@ export const COMMAND_REGISTRY: CommandDefinition[] = [
     },
   }),
   defineCommandWithArgs({
+    name: 'interview',
+    handler: (params, args) => {
+      const trimmedArgs = args.trim()
+
+      params.saveToHistory(params.inputValue.trim())
+      clearInput(params)
+
+      // If user provided text directly, send it immediately
+      if (trimmedArgs) {
+        params.sendMessage({
+          content: buildInterviewPrompt(trimmedArgs),
+          agentMode: params.agentMode,
+        })
+        setTimeout(() => {
+          params.scrollToLatest()
+        }, 0)
+        return
+      }
+
+      // Otherwise enter interview mode
+      useChatStore.getState().setInputMode('interview')
+    },
+  }),
+  defineCommandWithArgs({
+    name: 'plan',
+    handler: (params, args) => {
+      // In freebuff mode, require ChatGPT connection
+      if (IS_FREEBUFF && !getChatGptOAuthStatus().connected) {
+        params.setMessages((prev) => [
+          ...prev,
+          getUserMessage(params.inputValue.trim()),
+          getSystemMessage(
+            'Connect your ChatGPT account to use /plan. Use /connect to get started.',
+          ),
+        ])
+        params.saveToHistory(params.inputValue.trim())
+        clearInput(params)
+        useChatStore.getState().setInputMode('connect:chatgpt')
+        return
+      }
+
+      const trimmedArgs = args.trim()
+
+      params.saveToHistory(params.inputValue.trim())
+      clearInput(params)
+
+      // If user provided plan text directly, send it immediately
+      if (trimmedArgs) {
+        params.sendMessage({
+          content: buildPlanPrompt(trimmedArgs),
+          agentMode: params.agentMode,
+        })
+        setTimeout(() => {
+          params.scrollToLatest()
+        }, 0)
+        return
+      }
+
+      // Otherwise enter plan mode
+      useChatStore.getState().setInputMode('plan')
+    },
+  }),
+  defineCommandWithArgs({
     name: 'review',
     handler: (params, args) => {
+      // In freebuff mode, require ChatGPT connection
+      if (IS_FREEBUFF && !getChatGptOAuthStatus().connected) {
+        params.setMessages((prev) => [
+          ...prev,
+          getUserMessage(params.inputValue.trim()),
+          getSystemMessage(
+            'Connect your ChatGPT account to use /review. Use /connect to get started.',
+          ),
+        ])
+        params.saveToHistory(params.inputValue.trim())
+        clearInput(params)
+        useChatStore.getState().setInputMode('connect:chatgpt')
+        return
+      }
+
       const trimmedArgs = args.trim()
 
       params.saveToHistory(params.inputValue.trim())
@@ -499,9 +563,8 @@ export const COMMAND_REGISTRY: CommandDefinition[] = [
 
       // If user provided review text directly, send it immediately without showing the screen
       if (trimmedArgs) {
-        const reviewPrompt = `@GPT-5 Agent Please review: ${trimmedArgs}`
         params.sendMessage({
-          content: reviewPrompt,
+          content: buildReviewPromptFromArgs(trimmedArgs),
           agentMode: params.agentMode,
         })
         setTimeout(() => {
@@ -528,7 +591,32 @@ export const COMMAND_REGISTRY: CommandDefinition[] = [
       clearInput(params)
     },
   }),
+  // /end-session (freebuff-only) — end the active session early and drop back
+  // to the model picker. The hook flips status to 'none', which unmounts
+  // <Chat> and mounts <WaitingRoomScreen> on the landing view, where the
+  // user picks a model and hits Enter to rejoin the queue.
+  defineCommand({
+    name: 'end-session',
+    aliases: ['model'],
+    handler: (params) => {
+      params.setMessages((prev) => [
+        ...prev,
+        getUserMessage(params.inputValue.trim()),
+        getSystemMessage(END_SESSION_MESSAGE),
+      ])
+      params.saveToHistory(params.inputValue.trim())
+      clearInput(params)
+      returnToFreebuffLanding({ resetChat: true }).catch(() => {
+        // The hook surfaces poll errors via the session store; nothing to do
+        // here beyond letting the chat history reflect the attempt.
+      })
+    },
+  }),
 ]
+
+export const COMMAND_REGISTRY: CommandDefinition[] = IS_FREEBUFF
+  ? ALL_COMMANDS.filter((cmd) => !FREEBUFF_REMOVED_COMMANDS.has(cmd.name))
+  : ALL_COMMANDS.filter((cmd) => !FREEBUFF_ONLY_COMMANDS.has(cmd.name))
 
 export function findCommand(cmd: string): CommandDefinition | undefined {
   const lowerCmd = cmd.toLowerCase()

@@ -82,7 +82,11 @@ export {
 export type { CodebuffFileSystem } from '@codebuff/common/types/filesystem'
 
 // Tree-sitter / code-map exports
-export { getFileTokenScores, setWasmDir } from '@codebuff/code-map'
+export {
+  getFileTokenScores,
+  setWasmDir,
+  setTreeSitterWasmPath,
+} from '@codebuff/code-map'
 export type { FileTokenData, TokenCallerMap } from '@codebuff/code-map'
 
 export { runTerminalCommand } from './tools/run-terminal-command'
@@ -91,4 +95,6 @@ export {
   promptAiSdkStream,
   promptAiSdkStructured,
 } from './impl/llm'
-export { resetClaudeOAuthRateLimit } from './impl/model-provider'
+export {
+  resetChatGptOAuthRateLimit,
+} from './impl/model-provider'

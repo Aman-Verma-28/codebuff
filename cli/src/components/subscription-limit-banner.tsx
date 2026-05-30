@@ -1,5 +1,6 @@
 import { SUBSCRIPTION_TIERS } from '@codebuff/common/constants/subscription-plans'
-import open from 'open'
+import { IS_FREEBUFF } from '../utils/constants'
+import { safeOpen } from '../utils/open-url'
 import React from 'react'
 
 import { Button } from './button'
@@ -14,6 +15,8 @@ import { formatResetTime } from '../utils/time-format'
 import { BORDER_CHARS } from '../utils/ui-constants'
 
 export const SubscriptionLimitBanner = () => {
+  if (IS_FREEBUFF) return null
+
   const setInputMode = useChatStore((state) => state.setInputMode)
   const theme = useTheme()
 
@@ -58,11 +61,11 @@ export const SubscriptionLimitBanner = () => {
   }
 
   const handleBuyCredits = () => {
-    open(WEBSITE_URL + '/usage')
+    safeOpen(WEBSITE_URL + '/usage')
   }
 
   const handleUpgrade = () => {
-    open(WEBSITE_URL + '/subscribe')
+    safeOpen(WEBSITE_URL + '/subscribe')
   }
 
   const borderColor = isWeeklyLimit ? theme.error : theme.warning

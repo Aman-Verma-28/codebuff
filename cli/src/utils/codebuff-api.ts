@@ -1,4 +1,5 @@
 import { WEBSITE_URL } from '@codebuff/sdk'
+import { getSystemProcessEnv } from './env'
 
 import type {
   PublishAgentsResponse,
@@ -20,10 +21,10 @@ export type ApiResponse<T> =
 // ============================================================================
 
 /** User fields that can be fetched from /api/v1/me */
-export type UserField = 'id' | 'email' | 'discord_id' | 'referral_code'
+export type UserField = 'id' | 'email' | 'discord_id'
 
 export type UserDetails<T extends UserField = UserField> = {
-  [K in T]: K extends 'discord_id' | 'referral_code' ? string | null : string
+  [K in T]: K extends 'discord_id' ? string | null : string
 }
 
 export interface UsageRequest {
@@ -56,15 +57,6 @@ export interface LoginStatusRequest {
 
 export interface LoginStatusResponse {
   user?: Record<string, unknown>
-}
-
-export interface ReferralRequest {
-  referralCode: string
-}
-
-export interface ReferralResponse {
-  credits_redeemed?: number
-  error?: string
 }
 
 export interface LogoutRequest {
@@ -112,6 +104,13 @@ export interface CodebuffApiClientConfig {
   defaultTimeoutMs?: number
   /** Default retry configuration */
   retry?: RetryConfig
+  /**
+   * Proxy URL to use for all requests.
+   * If not set, falls back to HTTPS_PROXY / https_proxy / HTTP_PROXY / http_proxy
+   * environment variables. Set to null to explicitly disable proxy even if env
+   * vars are present.
+   */
+  proxy?: string | null
 }
 
 /**
@@ -191,9 +190,6 @@ export interface CodebuffApiClient {
     req: LoginStatusRequest,
   ): Promise<ApiResponse<LoginStatusResponse>>
 
-  /** Redeem a referral code via /api/referrals */
-  referral(req: ReferralRequest): Promise<ApiResponse<ReferralResponse>>
-
   /** Publish agents via /api/agents/publish */
   publish(
     data: Record<string, unknown>[],
@@ -205,6 +201,23 @@ export interface CodebuffApiClient {
 
   /** Submit feedback via /api/v1/feedback */
   feedback(req: FeedbackRequest): Promise<ApiResponse<FeedbackResponse>>
+}
+
+/**
+ * Resolve the proxy URL from standard environment variables.
+ * Priority: HTTPS_PROXY > https_proxy > HTTP_PROXY > http_proxy
+ * Returns undefined when no proxy is configured.
+ */
+export function resolveProxyUrl(
+  env: Record<string, string | undefined> = getSystemProcessEnv(),
+): string | undefined {
+  return (
+    env['HTTPS_PROXY'] ||
+    env['https_proxy'] ||
+    env['HTTP_PROXY'] ||
+    env['http_proxy'] ||
+    undefined
+  )
 }
 
 /**
@@ -265,7 +278,15 @@ export function createCodebuffApiClient(
     fetch: fetchFn = fetch,
     defaultTimeoutMs = 30000,
     retry: defaultRetryConfig = {},
+    proxy: proxyConfig,
   } = config
+
+  // Resolve proxy: explicit config wins, then env vars, then no proxy.
+  // Pass proxy: null to explicitly disable even when env vars are set.
+  const proxyUrl: string | undefined =
+    proxyConfig === null
+      ? undefined
+      : (proxyConfig ?? resolveProxyUrl())
 
   const mergedDefaultRetry: Required<RetryConfig> = {
     ...DEFAULT_RETRY_CONFIG,
@@ -333,7 +354,12 @@ export function createCodebuffApiClient(
         const response = await fetchFn(url, {
           ...fetchOptions,
           signal: controller.signal,
-        })
+          // Bun supports a `proxy` option on fetch. When a proxy URL is
+          // resolved (from config or env vars) we pass it here so that all
+          // API calls are tunnelled through the proxy. The cast is required
+          // because the WhatWG RequestInit type does not include `proxy`.
+          ...(proxyUrl ? { proxy: proxyUrl } : {}),
+        } as RequestInit)
 
         clearTimeout(timeoutId)
 
@@ -494,17 +520,6 @@ export function createCodebuffApiClient(
         },
         includeAuth: false,
       })
-    },
-
-    referral(req: ReferralRequest): Promise<ApiResponse<ReferralResponse>> {
-      // Auth is sent via Authorization header (includeAuth defaults to true)
-      // Also include cookie for legacy web session support
-      return request<ReferralResponse>(
-        'POST',
-        '/api/referrals',
-        { referralCode: req.referralCode },
-        { includeCookie: true },
-      )
     },
 
     publish(

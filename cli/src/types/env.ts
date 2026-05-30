@@ -26,6 +26,10 @@ export type CliEnv = BaseEnv & {
   SSH_TTY?: string
   SSH_CONNECTION?: string
 
+  // Display server detection (Linux headless check)
+  DISPLAY?: string
+  WAYLAND_DISPLAY?: string
+
   // Terminal-specific
   KITTY_WINDOW_ID?: string
   SIXEL_SUPPORT?: string
@@ -69,6 +73,7 @@ export type CliEnv = BaseEnv & {
   CODEBUFF_RG_PATH?: string
   CODEBUFF_SCROLL_MULTIPLIER?: string
   CODEBUFF_PERF_TEST?: string
+  FREEBUFF_MODE?: string
 }
 
 /**

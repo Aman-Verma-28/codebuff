@@ -2,7 +2,7 @@ import { castDraft } from 'immer'
 import { create } from 'zustand'
 import { immer } from 'zustand/middleware/immer'
 
-import { AGENT_MODES } from '../utils/constants'
+import { AGENT_MODES, IS_FREEBUFF } from '../utils/constants'
 import { clamp } from '../utils/math'
 import { loadModePreference, saveModePreference } from '../utils/settings'
 
@@ -21,6 +21,7 @@ import type {
   PendingImageStatus,
   PendingImageAttachment,
   PendingTextAttachment,
+  PendingFileAttachment,
   PendingAttachment,
   PendingImage,
   PendingBashMessage,
@@ -39,6 +40,7 @@ export type {
   PendingImageStatus,
   PendingImageAttachment,
   PendingTextAttachment,
+  PendingFileAttachment,
   PendingAttachment,
   PendingImage,
   PendingBashMessage,
@@ -152,6 +154,7 @@ type ChatStoreActions = {
   addPendingTextAttachment: (attachment: Omit<PendingTextAttachment, 'kind'>) => void
   removePendingTextAttachment: (id: string) => void
   clearPendingTextAttachments: () => void
+  addPendingFileAttachment: (attachment: Omit<PendingFileAttachment, 'kind'>) => void
   addPendingBashMessage: (message: PendingBashMessage) => void
   updatePendingBashMessage: (
     id: string,
@@ -182,7 +185,7 @@ const initialState: ChatStoreState = {
   isChainInProgress: false,
   slashSelectedIndex: 0,
   agentSelectedIndex: 0,
-  agentMode: loadModePreference(),
+  agentMode: IS_FREEBUFF ? ('LITE' as const) : loadModePreference(),
   hasReceivedPlanResponse: false,
   lastMessageMode: null,
   sessionCreditsUsed: 0,
@@ -269,12 +272,14 @@ export const useChatStore = create<ChatStore>()(
 
     setAgentMode: (mode) =>
       set((state) => {
+        if (IS_FREEBUFF) return
         state.agentMode = mode
         saveModePreference(mode)
       }),
 
     toggleAgentMode: () =>
       set((state) => {
+        if (IS_FREEBUFF) return
         const currentIndex = AGENT_MODES.indexOf(state.agentMode)
         const nextIndex = (currentIndex + 1) % AGENT_MODES.length
         state.agentMode = AGENT_MODES[nextIndex]
@@ -328,10 +333,10 @@ export const useChatStore = create<ChatStore>()(
 
     addPendingAttachment: (attachment) =>
       set((state) => {
-        // Don't add duplicates
-        const id = attachment.kind === 'image' ? attachment.path : attachment.id
+        // Don't add duplicates — use path for image/file, id for text
+        const id = attachment.kind === 'text' ? attachment.id : attachment.path
         const isDuplicate = state.pendingAttachments.some((a) =>
-          a.kind === 'image' ? a.path === id : a.id === id,
+          a.kind === 'text' ? a.id === id : a.path === id,
         )
         if (!isDuplicate) {
           state.pendingAttachments.push(attachment)
@@ -341,7 +346,7 @@ export const useChatStore = create<ChatStore>()(
     removePendingAttachment: (id) =>
       set((state) => {
         state.pendingAttachments = state.pendingAttachments.filter((a) =>
-          a.kind === 'image' ? a.path !== id : a.id !== id,
+          a.kind === 'text' ? a.id !== id : a.path !== id,
         )
       }),
 
@@ -389,6 +394,10 @@ export const useChatStore = create<ChatStore>()(
           (a) => a.kind !== 'text',
         )
       }),
+
+    addPendingFileAttachment: (attachment) => {
+      useChatStore.getState().addPendingAttachment({ ...attachment, kind: 'file' })
+    },
 
     updateAskUserAnswer: (questionIndex, optionIndex) =>
       set((state) => {

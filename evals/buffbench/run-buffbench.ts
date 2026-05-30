@@ -27,9 +27,13 @@ function parseAgentId(agent: string): {
 } {
   if (agent.startsWith('external:')) {
     const externalType = agent.slice('external:'.length) as ExternalAgentType
-    if (externalType !== 'claude' && externalType !== 'codex') {
+    if (
+      externalType !== 'claude' &&
+      externalType !== 'codex' &&
+      externalType !== 'opencode'
+    ) {
       throw new Error(
-        `Unknown external agent type: ${externalType}. Supported: claude, codex`,
+        `Unknown external agent type: ${externalType}. Supported: claude, codex, opencode`,
       )
     }
     return { agentId: agent, externalAgentType: externalType }
@@ -57,6 +61,7 @@ async function runTask(options: {
   printEvents: boolean
   finalCheckCommands?: string[]
   disableAnalysis?: boolean
+  saveTraces?: boolean
 }) {
   const {
     client,
@@ -74,6 +79,7 @@ async function runTask(options: {
     printEvents,
     finalCheckCommands,
     disableAnalysis,
+    saveTraces = false,
   } = options
 
   console.log(
@@ -172,6 +178,24 @@ async function runTask(options: {
       timestamp: new Date().toISOString(),
       finalCheckOutputs: agentResult.finalCheckOutputs,
     })
+
+    // Save judge traces to separate files if saveTraces is enabled
+    if (saveTraces) {
+      const tracesDir = path.join(logsDir, 'traces')
+      if (!fs.existsSync(tracesDir)) {
+        fs.mkdirSync(tracesDir, { recursive: true })
+      }
+
+      // Save agent trace only (not judge traces)
+      const agentTracePath = path.join(
+        tracesDir,
+        `${index + 1}-${safeTaskId}-${safeAgentId}-${safeCommitShort}-agent.json`,
+      )
+      fs.writeFileSync(
+        agentTracePath,
+        JSON.stringify(agentResult.trace, null, 2),
+      )
+    }
 
     fs.writeFileSync(
       tracePath,
@@ -300,6 +324,7 @@ export async function runBuffBench(options: {
   taskIds?: string[]
   extractLessons?: boolean
   disableAnalysis?: boolean
+  saveTraces?: boolean
 }) {
   const {
     evalDataPaths,
@@ -308,6 +333,7 @@ export async function runBuffBench(options: {
     taskIds,
     extractLessons = false,
     disableAnalysis = false,
+    saveTraces = false,
   } = options
 
   if (evalDataPaths.length === 0) {
@@ -453,6 +479,7 @@ export async function runBuffBench(options: {
         printEvents: agents.length === 1 && taskConcurrency === 1,
         finalCheckCommands: evalData.finalCheckCommands,
         disableAnalysis,
+        saveTraces,
       }),
     )
   })

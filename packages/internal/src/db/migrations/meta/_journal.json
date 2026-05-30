@@ -279,7 +279,7 @@
       "idx": 39,
       "version": "7",
       "when": 1770252529987,
-      "tag": "0039_bumpy_vertigo",
+      "tag": "0039_quiet_franklin_storm",
       "breakpoints": true
     },
     {
@@ -294,6 +294,111 @@
       "version": "7",
       "when": 1770334047429,
       "tag": "0041_nappy_nebula",
+      "breakpoints": true
+    },
+    {
+      "idx": 42,
+      "version": "7",
+      "when": 1773878149145,
+      "tag": "0042_needy_jack_murdock",
+      "breakpoints": true
+    },
+    {
+      "idx": 43,
+      "version": "7",
+      "when": 1776461642346,
+      "tag": "0043_vengeful_boomer",
+      "breakpoints": true
+    },
+    {
+      "idx": 44,
+      "version": "7",
+      "when": 1776719872222,
+      "tag": "0044_violet_stingray",
+      "breakpoints": true
+    },
+    {
+      "idx": 45,
+      "version": "7",
+      "when": 1776813242936,
+      "tag": "0045_mean_sleeper",
+      "breakpoints": true
+    },
+    {
+      "idx": 46,
+      "version": "7",
+      "when": 1776898844362,
+      "tag": "0046_cloudy_firedrake",
+      "breakpoints": true
+    },
+    {
+      "idx": 47,
+      "version": "7",
+      "when": 1777317033289,
+      "tag": "0047_tough_silver_fox",
+      "breakpoints": true
+    },
+    {
+      "idx": 48,
+      "version": "7",
+      "when": 1777925902147,
+      "tag": "0048_wide_blob",
+      "breakpoints": true
+    },
+    {
+      "idx": 49,
+      "version": "7",
+      "when": 1777929052630,
+      "tag": "0049_loud_madame_masque",
+      "breakpoints": true
+    },
+    {
+      "idx": 50,
+      "version": "7",
+      "when": 1777936763321,
+      "tag": "0050_overrated_stellaris",
+      "breakpoints": true
+    },
+    {
+      "idx": 51,
+      "version": "7",
+      "when": 1778611718988,
+      "tag": "0051_easy_sersi",
+      "breakpoints": true
+    },
+    {
+      "idx": 52,
+      "version": "7",
+      "when": 1778617513407,
+      "tag": "0052_black_fantastic_four",
+      "breakpoints": true
+    },
+    {
+      "idx": 53,
+      "version": "7",
+      "when": 1779337734037,
+      "tag": "0053_solid_karnak",
+      "breakpoints": true
+    },
+    {
+      "idx": 54,
+      "version": "7",
+      "when": 1779339183837,
+      "tag": "0054_clumsy_robin_chapel",
+      "breakpoints": true
+    },
+    {
+      "idx": 55,
+      "version": "7",
+      "when": 1779661395724,
+      "tag": "0055_glossy_gertrude_yorkes",
+      "breakpoints": true
+    },
+    {
+      "idx": 56,
+      "version": "7",
+      "when": 1779667810810,
+      "tag": "0056_simple_tyrannus",
       "breakpoints": true
     }
   ]

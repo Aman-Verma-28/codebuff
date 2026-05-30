@@ -16,6 +16,10 @@ import type { CliEnv } from '../types/env'
 export const getCliEnv = (): CliEnv => ({
   ...getBaseEnv(),
 
+  // Display server detection (Linux headless check)
+  DISPLAY: process.env.DISPLAY,
+  WAYLAND_DISPLAY: process.env.WAYLAND_DISPLAY,
+
   // Terminal detection (for tmux/screen passthrough)
   TERM: process.env.TERM,
   TMUX: process.env.TMUX,
@@ -69,6 +73,7 @@ export const getCliEnv = (): CliEnv => ({
   CODEBUFF_RG_PATH: process.env.CODEBUFF_RG_PATH,
   CODEBUFF_SCROLL_MULTIPLIER: process.env.CODEBUFF_SCROLL_MULTIPLIER,
   CODEBUFF_PERF_TEST: process.env.CODEBUFF_PERF_TEST,
+  FREEBUFF_MODE: process.env.FREEBUFF_MODE,
 })
 
 /**

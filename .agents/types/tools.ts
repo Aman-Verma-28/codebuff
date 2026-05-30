@@ -3,6 +3,7 @@
  */
 export type ToolName =
   | 'add_message'
+  | 'apply_patch'
   | 'ask_user'
   | 'code_search'
   | 'end_turn'
@@ -15,6 +16,7 @@ export type ToolName =
   | 'read_docs'
   | 'read_files'
   | 'read_subtree'
+  | 'render_ui'
   | 'run_file_change_hooks'
   | 'run_terminal_command'
   | 'set_messages'
@@ -33,6 +35,7 @@ export type ToolName =
  */
 export interface ToolParamsMap {
   add_message: AddMessageParams
+  apply_patch: ApplyPatchParams
   ask_user: AskUserParams
   code_search: CodeSearchParams
   end_turn: EndTurnParams
@@ -45,6 +48,7 @@ export interface ToolParamsMap {
   read_docs: ReadDocsParams
   read_files: ReadFilesParams
   read_subtree: ReadSubtreeParams
+  render_ui: RenderUiParams
   run_file_change_hooks: RunFileChangeHooksParams
   run_terminal_command: RunTerminalCommandParams
   set_messages: SetMessagesParams
@@ -65,6 +69,21 @@ export interface ToolParamsMap {
 export interface AddMessageParams {
   role: 'user' | 'assistant'
   content: string
+}
+
+/**
+ * Apply a file operation (create, update, or delete) using Codex-style apply_patch format.
+ */
+export interface ApplyPatchParams {
+  /** The file operation to perform. */
+  operation: {
+    /** Operation type: create_file, update_file, or delete_file */
+    type: 'create_file' | 'update_file' | 'delete_file'
+    /** File path relative to project root */
+    path: string
+    /** Diff content. Required for create_file and update_file. Lines prefixed with + for creates, unified diff with @@ hunks for updates. */
+    diff?: string
+  }
 }
 
 /**
@@ -162,10 +181,10 @@ export interface ProposeStrReplaceParams {
   /** Array of replacements to make. */
   replacements: {
     /** The string to replace. This must be an *exact match* of the string you want to replace, including whitespace and punctuation. */
-    old: string
-    /** The string to replace the corresponding old string with. Can be empty to delete. */
-    new: string
-    /** Whether to allow multiple replacements of old string. */
+    oldString: string
+    /** The string to replace the corresponding oldString with. Can be empty to delete. */
+    newString: string
+    /** Whether to allow multiple replacements of oldString. */
     allowMultiple?: boolean
   }[]
 }
@@ -178,7 +197,7 @@ export interface ProposeWriteFileParams {
   path: string
   /** What the change is intended to do in only one sentence. */
   instructions: string
-  /** Edit snippet to apply to the file. */
+  /** Complete file content to write to the file. */
   content: string
 }
 
@@ -210,6 +229,23 @@ export interface ReadSubtreeParams {
   paths?: string[]
   /** Maximum token budget for the subtree blob; the tree will be truncated to fit within this budget by first dropping file variables and then removing the most-nested files and directories. */
   maxTokens?: number
+}
+
+/**
+ * Render a small interactive UI widget in the Codebuff CLI. Currently supports a button that opens a link.
+ */
+export interface RenderUiParams {
+  /** The UI widget to render. */
+  widget: {
+    /** Widget type. Currently, the only supported widget is button. */
+    type: 'button'
+    /** Short button label shown to the user. */
+    text: string
+    /** The http:// or https:// URL to open when the user clicks the button. */
+    link: string
+    /** Theme-aware color treatment. Use primary for the main action and secondary for lower-emphasis actions. */
+    variant?: 'primary' | 'secondary'
+  }
 }
 
 /**
@@ -269,10 +305,10 @@ export interface StrReplaceParams {
   /** Array of replacements to make. */
   replacements: {
     /** The string to replace. This must be an *exact match* of the string you want to replace, including whitespace and punctuation. */
-    old: string
-    /** The string to replace the corresponding old string with. Can be empty to delete. */
-    new: string
-    /** Whether to allow multiple replacements of old string. */
+    oldString: string
+    /** The string to replace the corresponding oldString with. Can be empty to delete. */
+    newString: string
+    /** Whether to allow multiple replacements of oldString. */
     allowMultiple?: boolean
   }[]
 }
@@ -319,14 +355,14 @@ export interface WebSearchParams {
 }
 
 /**
- * Create or edit a file with the given content.
+ * Create or overwrite a file with the given content.
  */
 export interface WriteFileParams {
   /** Path to the file relative to the **project root** */
   path: string
   /** What the change is intended to do in only one sentence. */
   instructions: string
-  /** Edit snippet to apply to the file. */
+  /** Complete file content to write to the file. */
   content: string
 }
 

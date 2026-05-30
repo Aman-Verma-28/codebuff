@@ -1,3 +1,5 @@
+import { COMPOSIO_META_TOOL_NAMES } from '../constants/composio'
+
 import type { ToolResultOutput } from '../types/messages/content-part'
 import type { Tool } from 'ai'
 
@@ -14,12 +16,14 @@ export const TOOLS_WHICH_WONT_FORCE_NEXT_STEP = [
   'add_message',
   'update_subgoal',
   'create_plan',
+  'render_ui',
   'suggest_followups',
   'task_completed',
 ]
 
 // List of all available tools
 export const toolNames = [
+  'apply_patch',
   'add_subgoal',
   'add_message',
   'ask_user',
@@ -29,6 +33,7 @@ export const toolNames = [
   'end_turn',
   'find_files',
   'glob',
+  'gravity_index',
   'list_directory',
   'lookup_agent_info',
   'propose_str_replace',
@@ -36,6 +41,8 @@ export const toolNames = [
   'read_docs',
   'read_files',
   'read_subtree',
+  'read_url',
+  'render_ui',
   'run_file_change_hooks',
   'run_terminal_command',
   'set_messages',
@@ -51,15 +58,18 @@ export const toolNames = [
   'web_search',
   'write_file',
   'write_todos',
+  ...COMPOSIO_META_TOOL_NAMES,
 ] as const
 
 export const publishedTools = [
+  'apply_patch',
   'add_message',
   'ask_user',
   'code_search',
   'end_turn',
   'find_files',
   'glob',
+  'gravity_index',
   'list_directory',
   'lookup_agent_info',
   'propose_str_replace',
@@ -67,6 +77,8 @@ export const publishedTools = [
   'read_docs',
   'read_files',
   'read_subtree',
+  'read_url',
+  'render_ui',
   'run_file_change_hooks',
   'run_terminal_command',
   'set_messages',

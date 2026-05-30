@@ -1,4 +1,5 @@
 import { AnalyticsEvent } from '@codebuff/common/constants/analytics-events'
+import { CHATGPT_OAUTH_ENABLED } from '@codebuff/common/constants/chatgpt-oauth'
 import { runTerminalCommand } from '@codebuff/sdk'
 
 
@@ -7,15 +8,12 @@ import {
   type RouterParams,
   type CommandResult,
 } from './command-registry'
-import { handleReferralCode } from './referral'
 import {
   isSlashCommand,
-  isReferralCode,
-  extractReferralCode,
-  normalizeReferralCode,
   parseCommandInput,
 } from './router-utils'
-import { handleClaudeAuthCode } from '../components/claude-connect-banner'
+import { handleChatGptAuthCode } from '../components/chatgpt-connect-banner'
+import { buildInterviewPrompt, buildPlanPrompt, buildReviewPrompt } from './prompt-builders'
 import { getProjectRoot } from '../project-files'
 import { useChatStore } from '../state/chat-store'
 import { trackEvent } from '../utils/analytics'
@@ -28,6 +26,7 @@ import { getSystemProcessEnv } from '../utils/env'
 import { getSystemMessage, getUserMessage } from '../utils/message-history'
 import {
   capturePendingAttachments,
+  hasProcessingFiles,
   hasProcessingImages,
   validateAndAddImage,
 } from '../utils/pending-attachments'
@@ -308,6 +307,54 @@ export async function routeUserPrompt(
     return
   }
 
+  // Handle plan mode input
+  if (inputMode === 'plan') {
+    if (!trimmed) return
+    saveToHistory(trimmed)
+    setInputValue({ text: '', cursorPosition: 0, lastEditDueToNav: false })
+    setInputMode('default')
+    setInputFocused(true)
+    inputRef.current?.focus()
+
+    sendMessage({ content: buildPlanPrompt(trimmed), agentMode })
+    setTimeout(() => {
+      scrollToLatest()
+    }, 0)
+    return
+  }
+
+  // Handle interview mode input
+  if (inputMode === 'interview') {
+    if (!trimmed) return
+    saveToHistory(trimmed)
+    setInputValue({ text: '', cursorPosition: 0, lastEditDueToNav: false })
+    setInputMode('default')
+    setInputFocused(true)
+    inputRef.current?.focus()
+
+    sendMessage({ content: buildInterviewPrompt(trimmed), agentMode })
+    setTimeout(() => {
+      scrollToLatest()
+    }, 0)
+    return
+  }
+
+  // Handle review mode input
+  if (inputMode === 'review') {
+    if (!trimmed) return
+    saveToHistory(trimmed)
+    setInputValue({ text: '', cursorPosition: 0, lastEditDueToNav: false })
+    setInputMode('default')
+    setInputFocused(true)
+    inputRef.current?.focus()
+
+    sendMessage({ content: buildReviewPrompt('custom', trimmed), agentMode })
+    setTimeout(() => {
+      scrollToLatest()
+    }, 0)
+    return
+  }
+
   // Handle bash commands from queue (starts with '!')
   if (trimmed.startsWith('!') && trimmed.length > 1) {
     const command = trimmed.slice(1)
@@ -339,84 +386,26 @@ export async function routeUserPrompt(
     return
   }
 
-  // Handle connect:claude mode input (authorization code)
-  if (inputMode === 'connect:claude') {
+  // Handle connect:chatgpt mode input (authorization code)
+  if (inputMode === 'connect:chatgpt') {
+    if (!CHATGPT_OAUTH_ENABLED) {
+      setInputMode('default')
+      return
+    }
+
     const code = trimmed
     if (code) {
-      const result = await handleClaudeAuthCode(code)
+      const result = await handleChatGptAuthCode(code)
       setMessages((prev) => [
         ...prev,
         getUserMessage(trimmed),
         getSystemMessage(result.message),
       ])
     }
+
     saveToHistory(trimmed)
     setInputValue({ text: '', cursorPosition: 0, lastEditDueToNav: false })
     setInputMode('default')
-    return
-  }
-
-  // Handle referral mode input
-  if (inputMode === 'referral') {
-    // Validate the referral code (3-50 alphanumeric chars with optional dashes)
-    const codePattern = /^[a-zA-Z0-9-]{3,50}$/
-    // Strip prefix if present for validation (case-insensitive)
-    const codeWithoutPrefix = trimmed.toLowerCase().startsWith('ref-')
-      ? trimmed.slice(4)
-      : trimmed
-
-    if (!codePattern.test(codeWithoutPrefix)) {
-      setMessages((prev) => [
-        ...prev,
-        getUserMessage(trimmed),
-        getSystemMessage(
-          'Invalid referral code format. Codes should be 3-50 alphanumeric characters.',
-        ),
-      ])
-      saveToHistory(trimmed)
-      setInputValue({ text: '', cursorPosition: 0, lastEditDueToNav: false })
-      setInputMode('default')
-      return
-    }
-
-    const referralCode = normalizeReferralCode(trimmed)
-    try {
-      const { postUserMessage: referralPostMessage } =
-        await handleReferralCode(referralCode)
-      setMessages((prev) => [
-        ...prev,
-        getUserMessage(trimmed),
-        ...referralPostMessage([]),
-      ])
-    } catch (error) {
-      const errorMessage =
-        error instanceof Error ? error.message : 'Unknown error'
-      setMessages((prev) => [
-        ...prev,
-        getUserMessage(trimmed),
-        getSystemMessage(`Error redeeming referral code: ${errorMessage}`),
-      ])
-    }
-    saveToHistory(trimmed)
-    setInputValue({ text: '', cursorPosition: 0, lastEditDueToNav: false })
-    setInputMode('default')
-
-    return
-  }
-
-  // Handle referral codes (ref-XXXX format)
-  // Works with or without leading slash: "ref-123" or "/ref-123"
-  if (isReferralCode(trimmed)) {
-    const referralCode = extractReferralCode(trimmed)
-    const { postUserMessage: referralPostMessage } =
-      await handleReferralCode(referralCode)
-    setMessages((prev) => [
-      ...prev,
-      getUserMessage(trimmed),
-      ...referralPostMessage([]),
-    ])
-    saveToHistory(trimmed)
-    setInputValue({ text: '', cursorPosition: 0, lastEditDueToNav: false })
     return
   }
 
@@ -444,9 +433,9 @@ export async function routeUserPrompt(
 
   // Regular message or unknown slash command - send to agent
 
-  // Block sending if images are still processing
-  if (hasProcessingImages()) {
-    showClipboardMessage('processing images...', {
+  // Block sending if attachments are still processing
+  if (hasProcessingImages() || hasProcessingFiles()) {
+    showClipboardMessage('processing attachments...', {
       durationMs: 2000,
     })
     return

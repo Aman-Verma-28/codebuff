@@ -4,6 +4,7 @@ import type { ErrorOr } from '../../util/error'
 export type GetUserUsageDataFn = (params: {
   userId: string
   logger: Logger
+  includeSubscriptionCredits?: boolean
 }) => Promise<{
   usageThisCycle: number
   balance: {
@@ -11,6 +12,7 @@ export type GetUserUsageDataFn = (params: {
     totalDebt: number
     netBalance: number
     breakdown: Record<string, number>
+    principals: Record<string, number>
   }
   nextQuotaReset: string
   autoTopupTriggered?: boolean

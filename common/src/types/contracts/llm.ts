@@ -25,6 +25,13 @@ export type StreamChunk =
     >
   | { type: 'error'; message: string }
 
+export type CacheDebugUsageData = {
+  inputTokens: number
+  outputTokens: number
+  cachedInputTokens: number
+  totalTokens: number
+}
+
 export type PromptAiSdkStreamFn = (
   params: {
     apiKey: string
@@ -40,7 +47,14 @@ export type PromptAiSdkStreamFn = (
     agentId?: string
     maxRetries?: number
     onCostCalculated?: (credits: number) => Promise<void>
+    onCacheDebugProviderRequestBuilt?: (params: {
+      provider: string
+      rawBody: unknown
+      normalizedBody?: unknown
+    }) => void
+    onCacheDebugUsageReceived?: (usage: CacheDebugUsageData) => void
     includeCacheControl?: boolean
+    cacheDebugCorrelation?: string
     agentProviderOptions?: OpenRouterProviderRoutingOptions
     /** List of agents that can be spawned - used to transform agent tool calls */
     spawnableAgents?: string[]
@@ -48,6 +62,10 @@ export type PromptAiSdkStreamFn = (
     localAgentTemplates?: Record<string, AgentTemplate>
     /** Cost mode - 'free' mode means 0 credits charged for all agents */
     costMode?: string
+    /** Extra key/values merged into the request's `codebuff_metadata` field.
+     *  Used to forward client-scoped identifiers (e.g. `freebuff_instance_id`)
+     *  that server-side gates read from the chat-completions body. */
+    extraCodebuffMetadata?: Record<string, string>
     sendAction: SendActionFn
     logger: Logger
     trackEvent: TrackEventFn
@@ -68,7 +86,14 @@ export type PromptAiSdkFn = (
     chargeUser?: boolean
     agentId?: string
     onCostCalculated?: (credits: number) => Promise<void>
+    onCacheDebugProviderRequestBuilt?: (params: {
+      provider: string
+      rawBody: unknown
+      normalizedBody?: unknown
+    }) => void
+    onCacheDebugUsageReceived?: (usage: CacheDebugUsageData) => void
     includeCacheControl?: boolean
+    cacheDebugCorrelation?: string
     agentProviderOptions?: OpenRouterProviderRoutingOptions
     maxRetries?: number
     /** Cost mode - 'free' mode means 0 credits charged for all agents */
@@ -97,7 +122,14 @@ export type PromptAiSdkStructuredInput<T> = {
   chargeUser?: boolean
   agentId?: string
   onCostCalculated?: (credits: number) => Promise<void>
+  onCacheDebugProviderRequestBuilt?: (params: {
+    provider: string
+    rawBody: unknown
+    normalizedBody?: unknown
+  }) => void
+  onCacheDebugUsageReceived?: (usage: CacheDebugUsageData) => void
   includeCacheControl?: boolean
+  cacheDebugCorrelation?: string
   agentProviderOptions?: OpenRouterProviderRoutingOptions
   maxRetries?: number
   sendAction: SendActionFn

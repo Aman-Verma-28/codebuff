@@ -2,20 +2,20 @@ import fs from 'fs'
 import path from 'node:path'
 import os from 'os'
 
-import { CLAUDE_OAUTH_CLIENT_ID } from '@codebuff/common/constants/claude-oauth'
+import {
+  CHATGPT_OAUTH_CLIENT_ID,
+  CHATGPT_OAUTH_TOKEN_URL,
+} from '@codebuff/common/constants/chatgpt-oauth'
 import { env } from '@codebuff/common/env'
 import { userSchema } from '@codebuff/common/util/credentials'
 import { z } from 'zod/v4'
 
-import { getClaudeOAuthTokenFromEnv } from './env'
+import { getChatGptOAuthTokenFromEnv } from './env'
 
 import type { ClientEnv } from '@codebuff/common/types/contracts/env'
 import type { User } from '@codebuff/common/util/credentials'
 
-/**
- * Schema for Claude OAuth credentials.
- */
-const claudeOAuthSchema = z.object({
+const chatGptOAuthSchema = z.object({
   accessToken: z.string(),
   refreshToken: z.string(),
   expiresAt: z.number(),
@@ -24,11 +24,11 @@ const claudeOAuthSchema = z.object({
 
 /**
  * Unified schema for the credentials file.
- * Contains both Codebuff user credentials and Claude OAuth credentials.
+ * Contains both Codebuff user credentials and ChatGPT OAuth credentials.
  */
 const credentialsFileSchema = z.object({
   default: userSchema.optional(),
-  claudeOAuth: claudeOAuthSchema.optional(),
+  chatgptOAuth: chatGptOAuthSchema.optional(),
 })
 
 const ensureDirectoryExistsSync = (dir: string) => {
@@ -83,9 +83,9 @@ export const getUserCredentials = (clientEnv: ClientEnv = env): User | null => {
 }
 
 /**
- * Claude OAuth credentials stored in the credentials file.
+ * ChatGPT OAuth credentials stored in the credentials file.
  */
-export interface ClaudeOAuthCredentials {
+export interface ChatGptOAuthCredentials {
   accessToken: string
   refreshToken: string
   expiresAt: number // Unix timestamp in milliseconds
@@ -93,50 +93,42 @@ export interface ClaudeOAuthCredentials {
 }
 
 /**
- * Get Claude OAuth credentials from file or environment variable.
+ * Get ChatGPT OAuth credentials from environment variable or stored file.
  * Environment variable takes precedence.
- * @returns OAuth credentials or null if not found
  */
-export const getClaudeOAuthCredentials = (
+export const getChatGptOAuthCredentials = (
   clientEnv: ClientEnv = env,
-): ClaudeOAuthCredentials | null => {
-  // Check environment variable first
-  const envToken = getClaudeOAuthTokenFromEnv()
+): ChatGptOAuthCredentials | null => {
+  // 1. Environment variable takes highest precedence
+  const envToken = getChatGptOAuthTokenFromEnv()
   if (envToken) {
-    // Return a synthetic credentials object for env var tokens
-    // These tokens are assumed to be valid and non-expiring for simplicity
     return {
       accessToken: envToken,
       refreshToken: '',
-      expiresAt: Date.now() + 365 * 24 * 60 * 60 * 1000, // 1 year from now
+      expiresAt: Date.now() + 365 * 24 * 60 * 60 * 1000,
       connectedAt: Date.now(),
     }
   }
 
+  // 2. Codebuff's own stored credentials
   const credentialsPath = getCredentialsPath(clientEnv)
-  if (!fs.existsSync(credentialsPath)) {
-    return null
+  if (fs.existsSync(credentialsPath)) {
+    try {
+      const credentialsFile = fs.readFileSync(credentialsPath, 'utf8')
+      const parsed = credentialsFileSchema.safeParse(JSON.parse(credentialsFile))
+      if (parsed.success && parsed.data.chatgptOAuth) {
+        return parsed.data.chatgptOAuth
+      }
+    } catch {
+      // Fall through
+    }
   }
 
-  try {
-    const credentialsFile = fs.readFileSync(credentialsPath, 'utf8')
-    const parsed = credentialsFileSchema.safeParse(JSON.parse(credentialsFile))
-    if (!parsed.success || !parsed.data.claudeOAuth) {
-      return null
-    }
-    return parsed.data.claudeOAuth
-  } catch (error) {
-    console.error('Error reading Claude OAuth credentials', error)
-    return null
-  }
+  return null
 }
 
-/**
- * Save Claude OAuth credentials to the credentials file.
- * Preserves existing user credentials.
- */
-export const saveClaudeOAuthCredentials = (
-  credentials: ClaudeOAuthCredentials,
+export const saveChatGptOAuthCredentials = (
+  credentials: ChatGptOAuthCredentials,
   clientEnv: ClientEnv = env,
 ): void => {
   const configDir = getConfigDir(clientEnv)
@@ -155,17 +147,13 @@ export const saveClaudeOAuthCredentials = (
 
   const updatedData = {
     ...existingData,
-    claudeOAuth: credentials,
+    chatgptOAuth: credentials,
   }
 
   fs.writeFileSync(credentialsPath, JSON.stringify(updatedData, null, 2))
 }
 
-/**
- * Clear Claude OAuth credentials from the credentials file.
- * Preserves other credentials.
- */
-export const clearClaudeOAuthCredentials = (
+export const clearChatGptOAuthCredentials = (
   clientEnv: ClientEnv = env,
 ): void => {
   const credentialsPath = getCredentialsPath(clientEnv)
@@ -175,126 +163,107 @@ export const clearClaudeOAuthCredentials = (
 
   try {
     const existingData = JSON.parse(fs.readFileSync(credentialsPath, 'utf8'))
-    delete existingData.claudeOAuth
+    delete existingData.chatgptOAuth
     fs.writeFileSync(credentialsPath, JSON.stringify(existingData, null, 2))
   } catch {
     // Ignore errors
   }
 }
 
-/**
- * Check if Claude OAuth credentials are valid (not expired).
- * Returns true if credentials exist and haven't expired.
- */
-export const isClaudeOAuthValid = (clientEnv: ClientEnv = env): boolean => {
-  const credentials = getClaudeOAuthCredentials(clientEnv)
+export const isChatGptOAuthValid = (clientEnv: ClientEnv = env): boolean => {
+  const credentials = getChatGptOAuthCredentials(clientEnv)
   if (!credentials) {
     return false
   }
-  // Add 5 minute buffer before expiry
   const bufferMs = 5 * 60 * 1000
   return credentials.expiresAt > Date.now() + bufferMs
 }
 
-// Mutex to prevent concurrent refresh attempts
-let refreshPromise: Promise<ClaudeOAuthCredentials | null> | null = null
+let chatGptRefreshPromise: Promise<ChatGptOAuthCredentials | null> | null = null
 
-/**
- * Refresh the Claude OAuth access token using the refresh token.
- * Returns the new credentials if successful, null if refresh fails.
- * Uses a mutex to prevent concurrent refresh attempts.
- */
-export const refreshClaudeOAuthToken = async (
+export const refreshChatGptOAuthToken = async (
   clientEnv: ClientEnv = env,
-): Promise<ClaudeOAuthCredentials | null> => {
-  // If a refresh is already in progress, wait for it
-  if (refreshPromise) {
-    return refreshPromise
+): Promise<ChatGptOAuthCredentials | null> => {
+  if (chatGptRefreshPromise) {
+    return chatGptRefreshPromise
   }
 
-  const credentials = getClaudeOAuthCredentials(clientEnv)
+  const credentials = getChatGptOAuthCredentials(clientEnv)
   if (!credentials?.refreshToken) {
     return null
   }
 
-  // Start the refresh and store the promise
-  refreshPromise = (async () => {
+  chatGptRefreshPromise = (async () => {
     try {
-      const response = await fetch(
-        'https://console.anthropic.com/v1/oauth/token',
-        {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-          },
-          body: JSON.stringify({
-            grant_type: 'refresh_token',
-            refresh_token: credentials.refreshToken,
-            client_id: CLAUDE_OAUTH_CLIENT_ID,
-          }),
+      const response = await fetch(CHATGPT_OAUTH_TOKEN_URL, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
         },
-      )
+        body: JSON.stringify({
+          grant_type: 'refresh_token',
+          refresh_token: credentials.refreshToken,
+          client_id: CHATGPT_OAUTH_CLIENT_ID,
+        }),
+      })
 
       if (!response.ok) {
-        // Refresh failed, clear credentials
-        clearClaudeOAuthCredentials(clientEnv)
+        console.debug(`ChatGPT OAuth token refresh failed (status ${response.status})`)
         return null
       }
 
       const data = await response.json()
 
-      const newCredentials: ClaudeOAuthCredentials = {
+      if (
+        typeof data?.access_token !== 'string' ||
+        data.access_token.trim().length === 0
+      ) {
+        console.debug('ChatGPT OAuth token refresh returned empty access token')
+        return null
+      }
+
+      const expiresIn =
+        typeof data.expires_in === 'number' ? data.expires_in * 1000 : 3600 * 1000
+
+      const newCredentials: ChatGptOAuthCredentials = {
         accessToken: data.access_token,
         refreshToken: data.refresh_token ?? credentials.refreshToken,
-        expiresAt: Date.now() + data.expires_in * 1000,
+        expiresAt: Date.now() + expiresIn,
         connectedAt: credentials.connectedAt,
       }
 
-      // Save updated credentials
-      saveClaudeOAuthCredentials(newCredentials, clientEnv)
+      saveChatGptOAuthCredentials(newCredentials, clientEnv)
 
       return newCredentials
-    } catch {
-      // Refresh failed, clear credentials
-      clearClaudeOAuthCredentials(clientEnv)
+    } catch (error) {
+      console.debug('ChatGPT OAuth token refresh failed:', error instanceof Error ? error.message : String(error))
       return null
     } finally {
-      // Clear the mutex after completion
-      refreshPromise = null
+      chatGptRefreshPromise = null
     }
   })()
 
-  return refreshPromise
+  return chatGptRefreshPromise
 }
 
-/**
- * Get valid Claude OAuth credentials, refreshing if necessary.
- * This is the main function to use when you need credentials for an API call.
- *
- * - Returns credentials immediately if valid (>5 min until expiry)
- * - Attempts refresh if token is expired or near-expiry
- * - Returns null if no credentials or refresh fails
- */
-export const getValidClaudeOAuthCredentials = async (
+export const getValidChatGptOAuthCredentials = async (
   clientEnv: ClientEnv = env,
-): Promise<ClaudeOAuthCredentials | null> => {
-  const credentials = getClaudeOAuthCredentials(clientEnv)
+): Promise<ChatGptOAuthCredentials | null> => {
+  const credentials = getChatGptOAuthCredentials(clientEnv)
   if (!credentials) {
     return null
   }
 
-  // Check if token is from environment variable (synthetic credentials, no refresh needed)
+  const bufferMs = 5 * 60 * 1000
+
+  // No refresh token (e.g. env var override) — return only if still valid
   if (!credentials.refreshToken) {
-    // Environment variable tokens are assumed valid
-    return credentials
+    return credentials.expiresAt > Date.now() + bufferMs ? credentials : null
   }
 
-  // Check if token is valid with 5 minute buffer
-  const bufferMs = 5 * 60 * 1000
   if (credentials.expiresAt > Date.now() + bufferMs) {
     return credentials
   }
 
-  // Token is expired or expiring soon, try to refresh
-  return refreshClaudeOAuthToken(clientEnv)
+  return refreshChatGptOAuthToken(clientEnv)
 }

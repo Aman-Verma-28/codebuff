@@ -11,6 +11,7 @@ import { SuggestionMenu, type SuggestionItem } from './suggestion-menu'
 import { useAskUserBridge } from '../hooks/use-ask-user-bridge'
 import { useEvent } from '../hooks/use-event'
 import { useChatStore } from '../state/chat-store'
+import { shouldInterceptChatInputKey } from '../utils/chat-input-key-intercept'
 import { getInputModeConfig } from '../utils/input-modes'
 import { BORDER_CHARS } from '../utils/ui-constants'
 
@@ -70,6 +71,7 @@ interface ChatInputBarProps {
   // Handlers
   handleSubmit: () => Promise<void>
   onPaste: (fallbackText?: string) => void
+  onInterruptStream: () => void
 }
 
 export const ChatInputBar = ({
@@ -107,6 +109,7 @@ export const ChatInputBar = ({
   handlePublish,
   handleSubmit,
   onPaste,
+  onInterruptStream,
 }: ChatInputBarProps) => {
   const inputMode = useChatStore((state) => state.inputMode)
   const setInputMode = useChatStore((state) => state.setInputMode)
@@ -130,37 +133,13 @@ export const ChatInputBar = ({
       meta?: boolean
       option?: boolean
     }) => {
-      const isPlainEnter =
-        (key.name === 'return' || key.name === 'enter') &&
-        !key.shift &&
-        !key.ctrl &&
-        !key.meta &&
-        !key.option
-      const isTab = key.name === 'tab' && !key.ctrl && !key.meta && !key.option
-      const isUp = key.name === 'up' && !key.ctrl && !key.meta && !key.option
-      const isDown = key.name === 'down' && !key.ctrl && !key.meta && !key.option
-      const isUpDown = isUp || isDown
-
-      const hasSuggestions = hasSlashSuggestions || hasMentionSuggestions
-      if (hasSuggestions) {
-        if (isUpDown && lastEditDueToNav) {
-          return true
-        }
-        if (isPlainEnter || isTab || isUpDown) {
-          return true
-        }
-      }
-
-      const historyUpEnabled = lastEditDueToNav || cursorPosition === 0
-      const historyDownEnabled = lastEditDueToNav || cursorPosition === inputValue.length
-      if (isUp && historyUpEnabled) {
-        return true
-      }
-      if (isDown && historyDownEnabled) {
-        return true
-      }
-
-      return false
+      return shouldInterceptChatInputKey(key, {
+        hasSlashSuggestions,
+        hasMentionSuggestions,
+        lastEditDueToNav,
+        cursorPosition,
+        inputLength: inputValue.length,
+      })
     },
   )
 
@@ -195,8 +174,8 @@ export const ChatInputBar = ({
     return <InputModeBanner />
   }
 
-  // Referral mode: show only the referral banner (no input box)
-  if (inputMode === 'referral') {
+  // ChatGPT connect mode: show only the connect panel (no input box)
+  if (inputMode === 'connect:chatgpt') {
     return <InputModeBanner />
   }
 
@@ -283,6 +262,7 @@ export const ChatInputBar = ({
   const handleFormSkip = () => {
     if (!askUserState) return
     skip()
+    onInterruptStream()
   }
 
   const effectivePlaceholder =
@@ -343,6 +323,13 @@ export const ChatInputBar = ({
             backgroundColor: theme.surface,
           }}
         >
+          {modeConfig.label && (
+            <box style={{ flexShrink: 0, paddingRight: 1 }}>
+              <text>
+                <span bg={theme.info} fg={theme.background}>{` ${modeConfig.label} `}</span>
+              </text>
+            </box>
+          )}
           {modeConfig.icon && (
             <box
               style={{
@@ -426,6 +413,13 @@ export const ChatInputBar = ({
               width: '100%',
             }}
           >
+            {modeConfig.label && (
+              <box style={{ flexShrink: 0, paddingRight: 1 }}>
+                <text>
+                  <span bg={theme.info} fg={theme.background}>{` ${modeConfig.label} `}</span>
+                </text>
+              </box>
+            )}
             {modeConfig.icon && (
               <box
                 style={{

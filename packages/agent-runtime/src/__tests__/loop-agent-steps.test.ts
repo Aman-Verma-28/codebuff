@@ -1,14 +1,14 @@
 import * as analytics from '@codebuff/common/analytics'
 import { TEST_USER_ID } from '@codebuff/common/old-constants'
 import { createTestAgentRuntimeParams } from '@codebuff/common/testing/fixtures/agent-runtime'
+import { clearMockedModules } from '@codebuff/common/testing/mock-modules'
 import {
-  clearMockedModules,
-} from '@codebuff/common/testing/mock-modules'
-import { setupDbSpies } from '@codebuff/common/testing/mocks/database'
+  createMockDbOperations,
+  setupDbSpies,
+} from '@codebuff/common/testing/mocks/database'
 import { getInitialSessionState } from '@codebuff/common/types/session-state'
 import { AbortError, promptSuccess } from '@codebuff/common/util/error'
 import { assistantMessage, userMessage } from '@codebuff/common/util/messages'
-import db from '@codebuff/internal/db'
 import {
   afterAll,
   afterEach,
@@ -20,6 +20,7 @@ import {
   mock,
   spyOn,
 } from 'bun:test'
+import { APICallError, RetryError } from 'ai'
 import { z } from 'zod/v4'
 
 import { loopAgentSteps } from '../run-agent-step'
@@ -62,7 +63,7 @@ describe('loopAgentSteps - runAgentStep vs runProgrammaticStep behavior', () => 
     llmCallCount = 0
 
     // Setup spies for database operations using typed helper
-    dbSpies = setupDbSpies(db)
+    dbSpies = setupDbSpies(createMockDbOperations())
 
     agentRuntimeImpl.promptAiSdkStream = mock(async function* ({}) {
       llmCallCount++
@@ -660,13 +661,15 @@ describe('loopAgentSteps - runAgentStep vs runProgrammaticStep behavior', () => 
     // Mock promptAiSdk to capture the n parameter
     loopAgentStepsBaseParams.promptAiSdk = async (params: any) => {
       agentStepN = params.n
-      return promptSuccess(JSON.stringify([
-        'Response 1',
-        'Response 2',
-        'Response 3',
-        'Response 4',
-        'Response 5',
-      ]))
+      return promptSuccess(
+        JSON.stringify([
+          'Response 1',
+          'Response 2',
+          'Response 3',
+          'Response 4',
+          'Response 5',
+        ]),
+      )
     }
 
     await loopAgentSteps({
@@ -929,6 +932,147 @@ describe('loopAgentSteps - runAgentStep vs runProgrammaticStep behavior', () => 
 
       // LLM should not have been called since we aborted before starting
       expect(llmCallCount).toBe(0)
+    })
+  })
+
+  describe('API error handling', () => {
+    it('should propagate error code and server message from 403 APICallError responseBody', async () => {
+      const llmOnlyTemplate = {
+        ...mockTemplate,
+        handleSteps: undefined,
+      }
+
+      const localAgentTemplates = {
+        'test-agent': llmOnlyTemplate,
+      }
+
+      // Mock promptAiSdkStream to throw an APICallError with a 403 status
+      // and a responseBody containing the server's structured error
+      loopAgentStepsBaseParams.promptAiSdkStream = async function* () {
+        throw new APICallError({
+          statusCode: 403,
+          message: 'Forbidden',
+          url: 'https://api.codebuff.com/v1/chat/completions',
+          requestBodyValues: {},
+          responseBody: JSON.stringify({
+            error: 'free_mode_unavailable',
+            message: 'Free mode is not available in your country.',
+            countryCode: 'US',
+            countryBlockReason: 'anonymous_network',
+            ipPrivacySignals: ['vpn', 'hosting'],
+          }),
+          isRetryable: false,
+        })
+      }
+
+      const result = await loopAgentSteps({
+        ...loopAgentStepsBaseParams,
+        agentType: 'test-agent',
+        localAgentTemplates,
+      })
+
+      expect(result.output.type).toBe('error')
+      if (result.output.type === 'error') {
+        // Should use the server's message, NOT the generic "Forbidden"
+        expect(result.output.message).toBe(
+          'Free mode is not available in your country.',
+        )
+        // Should NOT have the 'Agent run error: ' prefix since message came from responseBody
+        expect(result.output.message).not.toContain('Agent run error:')
+        // Should propagate the error code so the CLI can match on it
+        expect(result.output.error).toBe('free_mode_unavailable')
+        // Should propagate the status code
+        expect(result.output.statusCode).toBe(403)
+        expect(result.output.countryCode).toBe('US')
+        expect(result.output.countryBlockReason).toBe('anonymous_network')
+        expect(result.output.ipPrivacySignals).toEqual(['vpn', 'hosting'])
+      }
+    })
+
+    it('should prefix with "Agent run error:" when responseBody has no parseable message', async () => {
+      const llmOnlyTemplate = {
+        ...mockTemplate,
+        handleSteps: undefined,
+      }
+
+      const localAgentTemplates = {
+        'test-agent': llmOnlyTemplate,
+      }
+
+      // APICallError with no responseBody
+      loopAgentStepsBaseParams.promptAiSdkStream = async function* () {
+        throw new APICallError({
+          statusCode: 500,
+          message: 'Internal Server Error',
+          url: 'https://api.codebuff.com/v1/chat/completions',
+          requestBodyValues: {},
+          responseBody: undefined,
+          isRetryable: true,
+        })
+      }
+
+      const result = await loopAgentSteps({
+        ...loopAgentStepsBaseParams,
+        agentType: 'test-agent',
+        localAgentTemplates,
+      })
+
+      expect(result.output.type).toBe('error')
+      if (result.output.type === 'error') {
+        // Should have the prefix since there's no server message
+        expect(result.output.message).toContain('Agent run error:')
+        expect(result.output.message).toContain('Internal Server Error')
+        // No error code since responseBody wasn't parseable
+        expect(result.output.error).toBeUndefined()
+      }
+    })
+
+    it('should unwrap retry errors to propagate underlying 409 gate errors', async () => {
+      const llmOnlyTemplate = {
+        ...mockTemplate,
+        handleSteps: undefined,
+      }
+
+      const localAgentTemplates = {
+        'test-agent': llmOnlyTemplate,
+      }
+
+      const apiError = new APICallError({
+        statusCode: 409,
+        message: 'Conflict',
+        url: 'https://api.codebuff.com/v1/chat/completions',
+        requestBodyValues: {},
+        responseBody: JSON.stringify({
+          error: 'session_superseded',
+          message:
+            'Another instance of freebuff has taken over this session. Only one instance per account is allowed.',
+        }),
+        isRetryable: true,
+      })
+
+      loopAgentStepsBaseParams.promptAiSdkStream = async function* () {
+        throw new RetryError({
+          message: 'Failed after 4 attempts. Last error: Conflict',
+          reason: 'maxRetriesExceeded',
+          errors: [apiError],
+        })
+      }
+
+      const result = await loopAgentSteps({
+        ...loopAgentStepsBaseParams,
+        agentType: 'test-agent',
+        localAgentTemplates,
+      })
+
+      expect(result.output.type).toBe('error')
+      if (result.output.type === 'error') {
+        expect(result.output.message).toBe(
+          'Another instance of freebuff has taken over this session. Only one instance per account is allowed.',
+        )
+        expect(result.output.message).not.toContain('Agent run error:')
+        expect(result.output.error).toBe('session_superseded')
+        expect(result.output.statusCode).toBe(409)
+      }
     })
   })
 })

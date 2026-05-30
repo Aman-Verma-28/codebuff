@@ -1,3 +1,5 @@
+import { randomBytes } from 'node:crypto'
+
 import { genAuthCode } from '@codebuff/common/util/credentials'
 import db from '@codebuff/internal/db'
 import * as schema from '@codebuff/internal/db/schema'
@@ -6,12 +8,18 @@ import { and, eq, gt } from 'drizzle-orm'
 import { NextResponse } from 'next/server'
 import { z } from 'zod/v4'
 
+import {
+  buildCliAuthCode,
+  getCliAuthCodeHashPrefix,
+  getCliAuthCodeTokenIdentifier,
+} from '@/app/onboard/_helpers'
 import { logger } from '@/util/logger'
+
+import { getLoginUrlOrigin } from './_origin'
 
 export async function POST(req: Request) {
   const reqSchema = z.object({
     fingerprintId: z.string(),
-    referralCode: z.string().optional(),
   })
   const requestBody = await req.json()
   const result = reqSchema.safeParse(requestBody)
@@ -19,7 +27,7 @@ export async function POST(req: Request) {
     return NextResponse.json({ error: 'Invalid request body' }, { status: 400 })
   }
 
-  const { fingerprintId, referralCode } = result.data
+  const { fingerprintId } = result.data
 
   try {
     const expiresAt = Date.now() + 60 * 60 * 1000 // 1 hour
@@ -56,15 +64,53 @@ export async function POST(req: Request) {
       )
     }
 
-    // Generate login URL without modifying the fingerprint record
-    const loginUrl = `${env.NEXT_PUBLIC_CODEBUFF_APP_URL}/login?auth_code=${fingerprintId}.${expiresAt}.${fingerprintHash}${
-      referralCode ? `&referral_code=${referralCode}` : ''
-    }`
+    const authCode = buildCliAuthCode(
+      fingerprintId,
+      expiresAt.toString(),
+      fingerprintHash,
+    )
+    const loginToken = randomBytes(32).toString('base64url')
+
+    await db.insert(schema.verificationToken).values({
+      identifier: getCliAuthCodeTokenIdentifier(loginToken),
+      token: authCode,
+      expires: new Date(expiresAt),
+    })
+
+    const loginUrl = new URL(
+      '/login',
+      getLoginUrlOrigin(
+        req,
+        env.NEXT_PUBLIC_CODEBUFF_APP_URL,
+        'https://codebuff.com',
+        env.NEXT_PUBLIC_CB_ENVIRONMENT !== 'prod',
+      ),
+    )
+    loginUrl.searchParams.set('auth_code', loginToken)
+
+    logger.info(
+      {
+        authCodeTokenHashPrefix: getCliAuthCodeHashPrefix(loginToken),
+        authCodeTokenLength: loginToken.length,
+        fingerprintIdPrefix: fingerprintId.slice(0, 24),
+        fingerprintIdLength: fingerprintId.length,
+        expiresAt,
+        loginUrlOrigin: loginUrl.origin,
+        requestOrigin: new URL(req.url).origin,
+        requestHost: req.headers.get('host'),
+        forwardedHost: req.headers.get('x-forwarded-host'),
+        forwardedProto: req.headers.get('x-forwarded-proto'),
+        originHeader: req.headers.get('origin'),
+        configuredAppUrl: env.NEXT_PUBLIC_CODEBUFF_APP_URL,
+        environment: env.NEXT_PUBLIC_CB_ENVIRONMENT,
+      },
+      'Issued Codebuff CLI auth code token',
+    )
 
     return NextResponse.json({
       fingerprintId,
       fingerprintHash,
-      loginUrl,
+      loginUrl: loginUrl.toString(),
       expiresAt,
     })
   } catch (error) {

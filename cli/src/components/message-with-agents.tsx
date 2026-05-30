@@ -10,6 +10,7 @@ import { MessageBlock } from './message-block'
 import { ModeDivider } from './mode-divider'
 import { useChatStore } from '../state/chat-store'
 import { useMessageBlockStore } from '../state/message-block-store'
+import { splitByAgentSize } from '../utils/block-processor'
 import { getCliEnv } from '../utils/env'
 import {
   AGENT_CONTENT_HORIZONTAL_PADDING,
@@ -48,6 +49,11 @@ const AgentChildrenGrid = memo(
       [depth],
     )
 
+    const subGroups = useMemo(
+      () => splitByAgentSize(agentChildren, (m) => m.agent?.agentType ?? ''),
+      [agentChildren],
+    )
+
     if (agentChildren.length === 0) return null
 
     if (depth >= MAX_AGENT_DEPTH) {
@@ -71,12 +77,17 @@ const AgentChildrenGrid = memo(
 
     return (
       <ErrorBoundary fallback={errorFallback} componentName="AgentChildrenGrid">
-        <GridLayout
-          items={agentChildren}
-          availableWidth={availableWidth}
-          getItemKey={getItemKey}
-          renderItem={renderAgentChild}
-        />
+        <box style={{ flexDirection: 'column', gap: 0, width: '100%' }}>
+          {subGroups.map((group) => (
+            <GridLayout
+              key={getItemKey(group[0])}
+              items={group}
+              availableWidth={availableWidth}
+              getItemKey={getItemKey}
+              renderItem={renderAgentChild}
+            />
+          ))}
+        </box>
       </ErrorBoundary>
     )
   },
@@ -106,13 +117,13 @@ export const MessageWithAgents = memo(
         })),
       )
 
-    const { onToggleCollapsed, onBuildFast, onBuildMax, onBuildFree, onFeedback, onCloseFeedback } =
+    const { onToggleCollapsed, onBuildFast, onBuildMax, onBuildLite, onFeedback, onCloseFeedback } =
       useMessageBlockStore(
         useShallow((state) => ({
           onToggleCollapsed: state.callbacks.onToggleCollapsed,
           onBuildFast: state.callbacks.onBuildFast,
           onBuildMax: state.callbacks.onBuildMax,
-          onBuildFree: state.callbacks.onBuildFree,
+          onBuildLite: state.callbacks.onBuildLite,
           onFeedback: state.callbacks.onFeedback,
           onCloseFeedback: state.callbacks.onCloseFeedback,
         })),
@@ -260,7 +271,7 @@ export const MessageWithAgents = memo(
                   onToggleCollapsed={onToggleCollapsed}
                   onBuildFast={onBuildFast}
                   onBuildMax={onBuildMax}
-                  onBuildFree={onBuildFree}
+                  onBuildLite={onBuildLite}
                   onFeedback={onFeedback}
                   onCloseFeedback={onCloseFeedback}
                   validationErrors={message.validationErrors}
@@ -268,6 +279,7 @@ export const MessageWithAgents = memo(
                   onOpenFeedback={onOpenFeedback}
                   attachments={message.attachments}
                   textAttachments={message.textAttachments}
+                  fileAttachments={message.fileAttachments}
                   metadata={message.metadata}
                   isLastMessage={isLastMessage}
                 />
@@ -295,7 +307,7 @@ export const MessageWithAgents = memo(
                 onToggleCollapsed={onToggleCollapsed}
                 onBuildFast={onBuildFast}
                 onBuildMax={onBuildMax}
-                onBuildFree={onBuildFree}
+                onBuildLite={onBuildLite}
                 onFeedback={onFeedback}
                 onCloseFeedback={onCloseFeedback}
                 validationErrors={message.validationErrors}
@@ -303,6 +315,7 @@ export const MessageWithAgents = memo(
                 onOpenFeedback={onOpenFeedback}
                 attachments={message.attachments}
                 textAttachments={message.textAttachments}
+                fileAttachments={message.fileAttachments}
                 metadata={message.metadata}
                 isLastMessage={isLastMessage}
               />

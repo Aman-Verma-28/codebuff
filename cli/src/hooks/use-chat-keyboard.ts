@@ -1,14 +1,18 @@
+import { statSync } from 'fs'
+
 import { useKeyboard } from '@opentui/react'
 import { useCallback, useRef } from 'react'
 
 import { getProjectRoot } from '../project-files'
 import { reportActivity } from '../utils/activity-tracker'
-import { hasClipboardImage, readClipboardText, readClipboardImageFilePath, getImageFilePathFromText } from '../utils/clipboard-image'
+import { hasClipboardImage, readClipboardText, readClipboardFilePath, getImageFilePathFromText } from '../utils/clipboard-image'
+import { isImageFile } from '../utils/image-handler'
 import {
   resolveChatKeyboardAction,
   type ChatKeyboardState,
   type ChatKeyboardAction,
 } from '../utils/keyboard-actions'
+import { markReturnKeySeenForKey } from '../utils/terminal-enter-detection'
 
 import type { KeyEvent } from '@opentui/core'
 
@@ -73,6 +77,7 @@ export type ChatKeyboardHandlers = {
   // Clipboard handlers
   onPasteImage: () => void
   onPasteImagePath: (imagePath: string) => void
+  onPasteFilePath: (filePath: string, isDirectory: boolean) => void
   onPasteText: (text: string) => void
 
   // Scroll handlers
@@ -201,18 +206,29 @@ function dispatchAction(
     case 'paste': {
       const cwd = getProjectRoot() ?? process.cwd()
       
-      // First, check if clipboard contains a copied image file (e.g., from Finder)
+      // First, check if clipboard contains a copied file (e.g., from Finder)
       // This is different from text - it's when you Cmd+C a file in Finder
-      const copiedImagePath = readClipboardImageFilePath()
-      if (copiedImagePath) {
-        handlers.onPasteImagePath(copiedImagePath)
-        return true
+      const copiedFilePath = readClipboardFilePath()
+      if (copiedFilePath) {
+        if (isImageFile(copiedFilePath)) {
+          handlers.onPasteImagePath(copiedFilePath)
+          return true
+        }
+        // Non-image file or directory
+        try {
+          const fileStats = statSync(copiedFilePath)
+          handlers.onPasteFilePath(copiedFilePath, fileStats.isDirectory())
+          return true
+        } catch {
+          // Fall through to other paste handlers
+        }
       }
       
       // Next, read clipboard text to check if it's a file path
       // This handles the case where a file is dragged/dropped - we want to use
       // the file path, not any stale image data that might be in the clipboard
-      const text = readClipboardText()
+      const rawText = readClipboardText()
+      const text = rawText ? Bun.stripANSI(rawText) : null
       if (text) {
         // Check if the text is a path to an image file
         const imagePath = getImageFilePathFromText(text, cwd)
@@ -260,7 +276,7 @@ function dispatchAction(
  * Integrates priority-based action resolution with handlers.
  *
  * This hook handles:
- * - Mode switching (bash, referral, etc.)
+ * - Mode switching (bash, etc.)
  * - Stream interruption
  * - Suggestion menu navigation (slash and mention menus)
  * - History navigation
@@ -288,6 +304,8 @@ export function useChatKeyboard({
           lastKeyboardActivityRef.current = now
           reportActivity()
         }
+
+        markReturnKeySeenForKey(key)
 
         const action = resolveChatKeyboardAction(key, state)
         const handled = dispatchAction(action, handlers)

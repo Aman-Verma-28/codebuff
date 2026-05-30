@@ -1,6 +1,4 @@
 import { AnalyticsEvent } from '@codebuff/common/constants/analytics-events'
-import { buildArray } from '@codebuff/common/util/array'
-import { getErrorObject } from '@codebuff/common/util/error'
 import db from '@codebuff/internal/db'
 import * as schema from '@codebuff/internal/db/schema'
 import { NextResponse } from 'next/server'
@@ -8,6 +6,15 @@ import { z } from 'zod'
 
 import { requireUserFromApiKey } from '../_helpers'
 
+import { createCarbonProvider } from '@/lib/ad-providers/carbon'
+import { createGravityProvider } from '@/lib/ad-providers/gravity'
+import { createZeroClickProvider } from '@/lib/ad-providers/zeroclick'
+
+import type {
+  AdProvider,
+  AdProviderId,
+  NormalizedAd,
+} from '@/lib/ad-providers/types'
 import type { TrackEventFn } from '@codebuff/common/types/contracts/analytics'
 import type { GetUserInfoFromApiKeyFn } from '@codebuff/common/types/contracts/database'
 import type {
@@ -15,8 +22,6 @@ import type {
   LoggerWithContextFn,
 } from '@codebuff/common/types/contracts/logger'
 import type { NextRequest } from 'next/server'
-
-const DEFAULT_PAYOUT = 0.04
 
 const messageSchema = z.object({
   role: z.string(),
@@ -29,15 +34,114 @@ const deviceSchema = z.object({
   locale: z.string().optional(),
 })
 
+const providerSchema = z
+  .enum(['gravity', 'carbon', 'zeroclick'])
+  .default('gravity')
+const surfaceSchema = z.enum(['waiting_room'])
+
 const bodySchema = z.object({
-  messages: z.array(messageSchema),
+  provider: providerSchema.optional(),
+  messages: z.array(messageSchema).optional().default([]),
   sessionId: z.string().optional(),
   device: deviceSchema.optional(),
+  surface: surfaceSchema.optional(),
+  /** Browser-like useragent passed through to providers that require it. */
+  userAgent: z.string().optional(),
 })
 
-export type GravityEnv = {
+export type AdsEnv = {
   GRAVITY_API_KEY: string
+  CARBON_ZONE_KEY?: string
+  ZEROCLICK_API_KEY?: string
   CB_ENVIRONMENT: string
+}
+
+function noAdsResponse(provider: AdProviderId) {
+  return NextResponse.json({ ads: [], provider }, { status: 200 })
+}
+
+const providerFallbacks: Record<AdProviderId, AdProviderId[]> = {
+  gravity: ['gravity', 'zeroclick', 'carbon'],
+  zeroclick: ['zeroclick', 'carbon'],
+  carbon: ['carbon'],
+}
+
+function createConfiguredProvider(
+  providerId: AdProviderId,
+  serverEnv: AdsEnv,
+  logger: Logger,
+): AdProvider | null {
+  switch (providerId) {
+    case 'carbon':
+      if (!serverEnv.CARBON_ZONE_KEY) {
+        logger.warn('[ads] CARBON_ZONE_KEY not configured')
+        return null
+      }
+      return createCarbonProvider({ zoneKey: serverEnv.CARBON_ZONE_KEY })
+    case 'zeroclick':
+      if (!serverEnv.ZEROCLICK_API_KEY) {
+        logger.warn('[ads] ZEROCLICK_API_KEY not configured')
+        return null
+      }
+      return createZeroClickProvider({ apiKey: serverEnv.ZEROCLICK_API_KEY })
+    case 'gravity':
+      if (!serverEnv.GRAVITY_API_KEY) {
+        logger.warn('[ads] GRAVITY_API_KEY not configured')
+        return null
+      }
+      return createGravityProvider({ apiKey: serverEnv.GRAVITY_API_KEY })
+  }
+}
+
+async function persistAdImpressions(params: {
+  ads: NormalizedAd[]
+  providerId: AdProviderId
+  userId: string
+  logger: Logger
+}) {
+  const { ads, providerId, userId, logger } = params
+
+  try {
+    await Promise.all(
+      ads.map((ad) =>
+        db
+          .insert(schema.adImpression)
+          .values({
+            user_id: userId,
+            provider: providerId,
+            ad_text: ad.adText,
+            title: ad.title,
+            cta: ad.cta,
+            url: ad.url,
+            favicon: ad.favicon,
+            click_url: ad.clickUrl,
+            imp_url: ad.impUrl,
+            extra_pixels: ad.extraPixels ?? null,
+            payout: ad.payout != null ? String(ad.payout) : null,
+            credits_granted: 0,
+          })
+          .onConflictDoNothing(),
+      ),
+    )
+  } catch (dbError) {
+    logger.warn(
+      {
+        userId,
+        provider: providerId,
+        adCount: ads.length,
+        error:
+          dbError instanceof Error
+            ? { name: dbError.name, message: dbError.message }
+            : dbError,
+      },
+      '[ads] Failed to persist ad_impression rows, serving anyway',
+    )
+  }
+}
+
+function toClientAd(ad: NormalizedAd) {
+  const { payout: _p, extraPixels: _e, ...rest } = ad
+  return rest
 }
 
 export async function postAds(params: {
@@ -47,7 +151,7 @@ export async function postAds(params: {
   loggerWithContext: LoggerWithContextFn
   trackEvent: TrackEventFn
   fetch: typeof globalThis.fetch
-  serverEnv: GravityEnv
+  serverEnv: AdsEnv
 }) {
   const {
     req,
@@ -70,22 +174,14 @@ export async function postAds(params: {
 
   const { userId, userInfo, logger } = authed.data
 
-  // Check if Gravity API key is configured
-  if (!serverEnv.GRAVITY_API_KEY) {
-    logger.warn('[ads] GRAVITY_API_KEY not configured')
-    return NextResponse.json({ ad: null }, { status: 200 })
-  }
-
-  // Extract client IP from request headers
+  // Client IP comes in via the load balancer's X-Forwarded-For header. Every
+  // provider that targets or bills by IP (Gravity, Carbon, ...) needs this.
   const forwardedFor = req.headers.get('x-forwarded-for')
   const clientIp = forwardedFor
     ? forwardedFor.split(',')[0].trim()
     : (req.headers.get('x-real-ip') ?? undefined)
 
-  // Parse and validate request body
-  let messages: z.infer<typeof bodySchema>['messages']
-  let sessionId: string | undefined
-  let deviceInfo: z.infer<typeof deviceSchema> | undefined
+  let parsedBody: z.infer<typeof bodySchema>
   try {
     const json = await req.json()
     const parsed = bodySchema.safeParse(json)
@@ -96,208 +192,80 @@ export async function postAds(params: {
         { status: 400 },
       )
     }
-
-    // Filter out messages with no content and extract user message content from tags
-    messages = parsed.data.messages
-      .filter((message) => message.content)
-      .map((message) => {
-        // For user messages, extract content from the last <user_message> tag if present
-        if (message.role === 'user') {
-          return {
-            ...message,
-            content: extractLastUserMessageContent(message.content),
-          }
-        }
-        return message
-      })
-    sessionId = parsed.data.sessionId
-    deviceInfo = parsed.data.device
+    parsedBody = parsed.data
   } catch {
-    logger.error(
-      { error: 'Invalid JSON in request body' },
-      '[ads] Invalid request body',
-    )
     return NextResponse.json(
       { error: 'Invalid JSON in request body' },
       { status: 400 },
     )
   }
 
-  // Keep just the last user message and the last assistant message before it
-  const lastUserMessageIndex = messages.findLastIndex(
-    (message) => message.role === 'user',
-  )
-  const lastUserMessage = messages[lastUserMessageIndex]
-  const lastAssistantMessage = messages
-    .slice(0, lastUserMessageIndex)
-    .findLast((message) => message.role === 'assistant')
-  const filteredMessages = buildArray(lastAssistantMessage, lastUserMessage)
+  const providerId: AdProviderId = parsedBody.provider ?? 'gravity'
+  const userAgent =
+    parsedBody.userAgent ?? req.headers.get('user-agent') ?? undefined
+  const requestUserAgent = req.headers.get('user-agent') ?? undefined
 
-  // Build device object for Gravity API
-  const device = clientIp
-    ? {
-      ip: clientIp,
-      ...(deviceInfo?.os ? { os: deviceInfo.os } : {}),
-      ...(deviceInfo?.timezone ? { timezone: deviceInfo.timezone } : {}),
-      ...(deviceInfo?.locale ? { locale: deviceInfo.locale } : {}),
-    }
-    : undefined
+  for (const providerToTry of providerFallbacks[providerId]) {
+    const provider = createConfiguredProvider(providerToTry, serverEnv, logger)
+    if (!provider) continue
 
-  try {
-    const requestBody = {
-      messages: filteredMessages,
-      sessionId: sessionId ?? userId,
-      placements: [
-        { placement: 'below_response', placement_id: 'code-assist-ad' },
-      ],
-      testAd: serverEnv.CB_ENVIRONMENT !== 'prod',
-      relevancy: 0.3,
-      ...(device ? { device } : {}),
-      user: {
-        id: userId,
-        email: userInfo.email,
-      },
-    }
-    // Call Gravity API
-    const response = await fetch('https://server.trygravity.ai/api/v1/ad', {
-      method: 'POST',
-      headers: {
-        Authorization: `Bearer ${serverEnv.GRAVITY_API_KEY}`,
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify(requestBody),
-    })
-
-    // Handle 204 No Content first (no body to parse)
-    if (response.status === 204) {
-      logger.debug(
-        { request: requestBody, status: response.status },
-        '[ads] No ad available from Gravity API',
-      )
-      return NextResponse.json({ ad: null }, { status: 200 })
-    }
-
-    // Check response.ok BEFORE parsing JSON to handle HTML error pages gracefully
-    if (!response.ok) {
-      // Try to get response body for logging, but don't fail if it's not JSON
-      let errorBody: unknown
-      try {
-        const contentType = response.headers.get('content-type') ?? ''
-        if (contentType.includes('application/json')) {
-          errorBody = await response.json()
-        } else {
-          // Likely an HTML error page from load balancer/CDN
-          errorBody = await response.text()
-        }
-      } catch {
-        errorBody = 'Unable to parse error response'
-      }
-      logger.error(
-        { request: requestBody, response: errorBody, status: response.status },
-        '[ads] Gravity API returned error',
-      )
-      return NextResponse.json({ ad: null }, { status: 200 })
-    }
-
-    // Now safe to parse JSON body since response.ok is true
-    const ads = await response.json()
-
-    if (!Array.isArray(ads) || ads.length === 0) {
-      logger.debug(
-        { request: requestBody, response: ads, status: response.status },
-        '[ads] No ads returned from Gravity API',
-      )
-      return NextResponse.json({ ad: null }, { status: 200 })
-    }
-
-    const ad = ads[0]
-
-    const payout = ad.payout || DEFAULT_PAYOUT
-
-    logger.info(
-      {
-        ad,
-        request: requestBody,
-        status: response.status,
-        payout: {
-          included: ad.payout && ad.payout > 0,
-          recieved: ad.payout,
-          default: DEFAULT_PAYOUT,
-          final: payout,
-        },
-      },
-      '[ads] Fetched ad from Gravity API',
-    )
-
-    // Insert ad_impression row to database (served_at = now)
-    // This stores the trusted ad data server-side so we don't have to trust the client later
     try {
-      await db.insert(schema.adImpression).values({
-        user_id: userId,
-        ad_text: ad.adText,
-        title: ad.title,
-        cta: ad.cta,
-        url: ad.url,
-        favicon: ad.favicon,
-        click_url: ad.clickUrl,
-        imp_url: ad.impUrl,
-        payout: String(payout),
-        credits_granted: 0, // Will be updated when impression is fired
+      const result = await provider.fetchAd({
+        userId,
+        userEmail: userInfo.email ?? null,
+        sessionId: parsedBody.sessionId,
+        clientIp,
+        userAgent,
+        requestUserAgent,
+        device: parsedBody.device,
+        surface: parsedBody.surface,
+        messages: parsedBody.messages,
+        testMode: serverEnv.CB_ENVIRONMENT !== 'prod',
+        logger,
+        fetch,
+      })
+
+      if (!result) {
+        logger.debug(
+          { provider: provider.id },
+          '[ads] Provider returned no fill',
+        )
+        continue
+      }
+
+      await persistAdImpressions({
+        ads: result.ads,
+        providerId: provider.id,
+        userId,
+        logger,
+      })
+
+      logger.info(
+        { provider: provider.id, adCount: result.ads.length },
+        '[ads] Fetched ads',
+      )
+      return NextResponse.json({
+        ads: result.ads.map(toClientAd),
+        provider: provider.id,
       })
     } catch (error) {
-      // If insert fails (e.g., duplicate impUrl), log but continue
-      // The ad can still be shown, it just won't be tracked
-      logger.warn(
+      logger.error(
         {
           userId,
-          impUrl: ad.impUrl,
-          status: response.status,
+          provider: provider.id,
           error:
             error instanceof Error
               ? { name: error.name, message: error.message }
               : error,
         },
-        '[ads] Failed to create ad_impression record (likely duplicate)',
+        '[ads] Failed to fetch ad',
       )
     }
-
-    // Return ad to client without payout (credits will come from impression endpoint)
-    const { payout: _payout, ...adWithoutPayout } = ad
-    return NextResponse.json({ ad: adWithoutPayout })
-  } catch (error) {
-    logger.error(
-      {
-        userId,
-        messages,
-        status: 500,
-        error:
-          error instanceof Error
-            ? { name: error.name, message: error.message }
-            : error,
-      },
-      '[ads] Failed to fetch ad from Gravity API',
-    )
-    return NextResponse.json(
-      { ad: null, error: getErrorObject(error) },
-      { status: 500 },
-    )
-  }
-}
-
-/**
- * Extract the content from the last <user_message> tag in a string.
- * If no tag is found, returns the original content.
- */
-function extractLastUserMessageContent(content: string): string {
-  // Find all <user_message>...</user_message> matches
-  const regex = /<user_message>([\s\S]*?)<\/user_message>/gi
-  const matches = [...content.matchAll(regex)]
-
-  if (matches.length > 0) {
-    // Return the content from the last match
-    const lastMatch = matches[matches.length - 1]
-    return lastMatch[1].trim()
   }
 
-  return content
+  logger.debug(
+    { requestedProvider: providerId },
+    '[ads] No configured provider returned an ad',
+  )
+  return noAdsResponse(providerId)
 }

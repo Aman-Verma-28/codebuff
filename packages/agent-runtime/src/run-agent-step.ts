@@ -1,12 +1,20 @@
 import { AnalyticsEvent } from '@codebuff/common/constants/analytics-events'
+import { shouldUseLocalTokenCountForFreebuffDeepseekFlash } from '@codebuff/common/constants/free-agents'
 import { supportsCacheControl } from '@codebuff/common/old-constants'
 import { TOOLS_WHICH_WONT_FORCE_NEXT_STEP } from '@codebuff/common/tools/constants'
 import { buildArray } from '@codebuff/common/util/array'
-import { AbortError, getErrorObject, isAbortError } from '@codebuff/common/util/error'
+import {
+  AbortError,
+  extractApiErrorDetails,
+  getErrorObject,
+  isAbortError,
+} from '@codebuff/common/util/error'
+import { serializeCacheDebugCorrelation } from '@codebuff/common/util/cache-debug'
 import { systemMessage, userMessage } from '@codebuff/common/util/messages'
-import { APICallError, type ToolSet } from 'ai'
+import { type ToolSet } from 'ai'
 import { cloneDeep, mapValues } from 'lodash'
 
+import { CACHE_DEBUG_FULL_LOGGING } from './constants'
 import { callTokenCountAPI } from './llm-api/codebuff-web-api'
 import { getMCPToolData } from './mcp'
 import { getAgentStreamFromTemplate } from './prompt-agent-stream'
@@ -18,6 +26,11 @@ import { getAgentPrompt } from './templates/strings'
 import { getToolSet } from './tools/prompts'
 import { processStream } from './tools/stream-parser'
 import { getAgentOutput } from './util/agent-output'
+import {
+  createCacheDebugSnapshot,
+  enrichCacheDebugSnapshotWithProviderRequest,
+  enrichCacheDebugSnapshotWithUsage,
+} from './util/cache-debug'
 import {
   withSystemInstructionTags,
   withSystemTags as withSystemTags,
@@ -33,11 +46,12 @@ import type {
   FinishAgentRunFn,
   StartAgentRunFn,
 } from '@codebuff/common/types/contracts/database'
-import type { PromptAiSdkFn } from '@codebuff/common/types/contracts/llm'
-import type { Logger } from '@codebuff/common/types/contracts/logger'
 import type {
-  ParamsExcluding,
-} from '@codebuff/common/types/function-params'
+  CacheDebugUsageData,
+  PromptAiSdkFn,
+} from '@codebuff/common/types/contracts/llm'
+import type { Logger } from '@codebuff/common/types/contracts/logger'
+import type { ParamsExcluding } from '@codebuff/common/types/function-params'
 import type {
   Message,
   ToolMessage,
@@ -230,14 +244,14 @@ export const runAgentStep = async (
     ...expireMessages(agentState.messageHistory, 'agentStep'),
 
     stepPrompt &&
-    userMessage({
-      content: stepPrompt,
-      tags: ['STEP_PROMPT'],
+      userMessage({
+        content: stepPrompt,
+        tags: ['STEP_PROMPT'],
 
-      // James: Deprecate the below, only use tags, which are not prescriptive.
-      timeToLive: 'agentStep' as const,
-      keepDuringTruncation: true,
-    }),
+        // James: Deprecate the below, only use tags, which are not prescriptive.
+        timeToLive: 'agentStep' as const,
+        keepDuringTruncation: true,
+      }),
   )
 
   agentState.messageHistory = agentMessagesUntruncated
@@ -254,6 +268,68 @@ export const runAgentStep = async (
 
   const iterationNum = agentState.messageHistory.length
   const systemTokens = countTokensJson(system)
+
+  let cacheDebugCorrelation:
+    | ReturnType<typeof createCacheDebugSnapshot>
+    | undefined
+  if (CACHE_DEBUG_FULL_LOGGING) {
+    try {
+      cacheDebugCorrelation = createCacheDebugSnapshot({
+        agentType: String(agentType),
+        system,
+        toolDefinitions: params.tools
+          ? Object.fromEntries(
+              Object.entries(params.tools).map(([name, tool]) => [
+                name,
+                {
+                  description: tool.description,
+                  inputSchema: tool.inputSchema as {},
+                },
+              ]),
+            )
+          : {},
+        messages: [systemMessage(system), ...agentState.messageHistory],
+        logger,
+        projectRoot: fileContext.projectRoot,
+        runId: agentState.runId,
+        userInputId,
+        agentStepId,
+        model,
+      })
+    } catch (err) {
+      logger.warn({ error: err }, '[Cache Debug] Failed to create snapshot')
+    }
+  }
+
+  const onCacheDebugProviderRequestBuilt = cacheDebugCorrelation
+    ? ({
+        provider,
+        rawBody,
+        normalizedBody,
+      }: {
+        provider: string
+        rawBody: unknown
+        normalizedBody?: unknown
+      }) => {
+        enrichCacheDebugSnapshotWithProviderRequest({
+          correlation: cacheDebugCorrelation,
+          provider,
+          rawBody,
+          normalized: normalizedBody ?? rawBody,
+          logger,
+        })
+      }
+    : undefined
+
+  const onCacheDebugUsageReceived = cacheDebugCorrelation
+    ? (usage: CacheDebugUsageData) => {
+        enrichCacheDebugSnapshotWithUsage({
+          correlation: cacheDebugCorrelation,
+          usage,
+          logger,
+        })
+      }
+    : undefined
 
   logger.debug(
     {
@@ -282,6 +358,11 @@ export const runAgentStep = async (
       model,
       n: params.n,
       onCostCalculated,
+      cacheDebugCorrelation: cacheDebugCorrelation
+        ? serializeCacheDebugCorrelation(cacheDebugCorrelation)
+        : undefined,
+      onCacheDebugProviderRequestBuilt,
+      onCacheDebugUsageReceived,
     })
 
     if (result.aborted) {
@@ -332,8 +413,13 @@ export const runAgentStep = async (
     ...params,
     agentId: agentState.parentId ? agentState.agentId : undefined,
     costMode: params.costMode,
+    cacheDebugCorrelation: cacheDebugCorrelation
+      ? serializeCacheDebugCorrelation(cacheDebugCorrelation)
+      : undefined,
     includeCacheControl: supportsCacheControl(agentTemplate.model),
     messages: [systemMessage(system), ...agentState.messageHistory],
+    onCacheDebugProviderRequestBuilt,
+    onCacheDebugUsageReceived,
     template: agentTemplate,
     onCostCalculated,
   })
@@ -438,7 +524,9 @@ export const runAgentStep = async (
       shouldEndTurn,
       duration: Date.now() - startTime,
       fullResponse,
-      finalMessageHistoryWithToolResults: agentState.messageHistory.concat().reverse(),
+      finalMessageHistoryWithToolResults: agentState.messageHistory
+        .concat()
+        .reverse(),
       toolCalls,
       toolResults,
       agentContext,
@@ -457,11 +545,22 @@ export const runAgentStep = async (
   }
 }
 
+/**
+ * Runs the agent loop.
+ *
+ * IMPORTANT: This function mutates `params.agentState` in place throughout the
+ * run (not just at return time). Fields like `messageHistory`, `systemPrompt`,
+ * `toolDefinitions`, `creditsUsed`, and `output` are updated as work progresses
+ * so that callers holding a reference to the same object (e.g. the SDK's
+ * `sessionState.mainAgentState`) see in-progress work immediately — which
+ * matters when an error is thrown mid-run and the normal return path is
+ * skipped.
+ */
 export async function loopAgentSteps(
   params: {
     addAgentStep: AddAgentStepFn
     agentState: AgentState
-    agentType: AgentTemplateType
+    agentType: string
     clearUserPromptMessagesAfterResponse?: boolean
     clientSessionId: string
     content?: Array<TextPart | ImagePart>
@@ -641,27 +740,27 @@ export async function loopAgentSteps(
   const agentTools = useParentTools
     ? {}
     : await buildAgentToolSet({
-      ...params,
-      spawnableAgents: agentTemplate.spawnableAgents,
-      agentTemplates: localAgentTemplates,
-    })
+        ...params,
+        spawnableAgents: agentTemplate.spawnableAgents,
+        agentTemplates: localAgentTemplates,
+      })
 
   const tools = useParentTools
     ? parentTools
     : await getToolSet({
-      toolNames: agentTemplate.toolNames,
-      additionalToolDefinitions: async () => {
-        if (!cachedAdditionalToolDefinitions) {
-          cachedAdditionalToolDefinitions = await additionalToolDefinitions({
-            ...params,
-            agentTemplate,
-          })
-        }
-        return cachedAdditionalToolDefinitions
-      },
-      agentTools,
-      skills: fileContext.skills ?? {},
-    })
+        toolNames: agentTemplate.toolNames,
+        additionalToolDefinitions: async () => {
+          if (!cachedAdditionalToolDefinitions) {
+            cachedAdditionalToolDefinitions = await additionalToolDefinitions({
+              ...params,
+              agentTemplate,
+            })
+          }
+          return cachedAdditionalToolDefinitions
+        },
+        agentTools,
+        skills: fileContext.skills ?? {},
+      })
 
   const hasUserMessage = Boolean(
     prompt ||
@@ -684,25 +783,25 @@ export async function loopAgentSteps(
         keepDuringTruncation: true,
       },
       prompt &&
-      prompt in additionalSystemPrompts &&
-      userMessage(
-        withSystemInstructionTags(
-          additionalSystemPrompts[
-          prompt as keyof typeof additionalSystemPrompts
-          ],
+        prompt in additionalSystemPrompts &&
+        userMessage(
+          withSystemInstructionTags(
+            additionalSystemPrompts[
+              prompt as keyof typeof additionalSystemPrompts
+            ],
+          ),
         ),
-      ),
       ,
     ],
 
     instructionsPrompt &&
-    userMessage({
-      content: instructionsPrompt,
-      tags: ['INSTRUCTIONS_PROMPT'],
+      userMessage({
+        content: instructionsPrompt,
+        tags: ['INSTRUCTIONS_PROMPT'],
 
-      // James: Deprecate the below, only use tags, which are not prescriptive.
-      keepLastTags: ['INSTRUCTIONS_PROMPT'],
-    }),
+        // James: Deprecate the below, only use tags, which are not prescriptive.
+        keepLastTags: ['INSTRUCTIONS_PROMPT'],
+      }),
   )
 
   // Convert tools to a serializable format for context-pruner token counting
@@ -721,12 +820,25 @@ export async function loopAgentSteps(
     return cachedAdditionalToolDefinitions
   }
 
-  let currentAgentState: AgentState = {
-    ...initialAgentState,
-    messageHistory: initialMessages,
-    systemPrompt: system,
-    toolDefinitions,
-  }
+  // Mutate initialAgentState so that in-progress work propagates back to the
+  // caller's shared reference (e.g. SDK's sessionState.mainAgentState) even if
+  // an error is thrown before we return.
+  initialAgentState.messageHistory = initialMessages
+  initialAgentState.systemPrompt = system
+  initialAgentState.toolDefinitions = toolDefinitions
+  let currentAgentState: AgentState = initialAgentState
+
+  // Convert tool definitions to Anthropic format for accurate token counting
+  // Tool definitions are stored as { [name]: { description, inputSchema } }
+  // Anthropic count_tokens API expects [{ name, description, input_schema }]
+  const toolsForTokenCount = Object.entries(toolDefinitions).map(
+    ([name, def]) => ({
+      name,
+      ...(def.description && { description: def.description }),
+      ...(def.inputSchema && { input_schema: def.inputSchema }),
+    }),
+  )
+
   let shouldEndTurn = false
   let hasRetriedOutputSchema = false
   let currentPrompt = prompt
@@ -756,33 +868,47 @@ export async function loopAgentSteps(
       const messagesWithStepPrompt = buildArray(
         ...currentAgentState.messageHistory,
         stepPrompt &&
-        userMessage({
-          content: stepPrompt,
-        }),
+          userMessage({
+            content: stepPrompt,
+          }),
       )
 
-      // Check context token count via Anthropic API
-      const tokenCountResult = await callTokenCountAPI({
-        messages: messagesWithStepPrompt,
-        system,
-        model: agentTemplate.model,
-        fetch,
-        logger,
-        env: { clientEnv, ciEnv },
-      })
-      if (tokenCountResult.inputTokens !== undefined) {
-        currentAgentState.contextTokenCount = tokenCountResult.inputTokens
-      } else if (tokenCountResult.error) {
-        logger.warn(
-          { error: tokenCountResult.error },
-          'Failed to get token count from Anthropic API',
-        )
-        // Fall back to local estimate
-        const estimatedTokens =
-          countTokensJson(currentAgentState.messageHistory) +
-          countTokensJson(system) +
-          countTokensJson(toolDefinitions)
-        currentAgentState.contextTokenCount = estimatedTokens
+      const estimateContextTokensLocally = () =>
+        countTokensJson(messagesWithStepPrompt) +
+        countTokensJson(system) +
+        countTokensJson(toolsForTokenCount)
+
+      if (
+        shouldUseLocalTokenCountForFreebuffDeepseekFlash({
+          agentId: agentTemplate.id,
+          model: agentTemplate.model,
+        })
+      ) {
+        currentAgentState.contextTokenCount = estimateContextTokensLocally()
+      } else {
+        // Check context token count via the web API.
+        const tokenCountResult = await callTokenCountAPI({
+          messages: messagesWithStepPrompt,
+          system,
+          model: agentTemplate.model,
+          tools: toolsForTokenCount,
+          fetch,
+          logger,
+          env: { clientEnv, ciEnv },
+        })
+        if (tokenCountResult.inputTokens !== undefined) {
+          currentAgentState.contextTokenCount = tokenCountResult.inputTokens
+        } else if (tokenCountResult.error) {
+          logger.warn(
+            { error: tokenCountResult.error },
+            'Failed to get token count from web API',
+          )
+          const estimatedTokens =
+            countTokensJson(currentAgentState.messageHistory) +
+            countTokensJson(system) +
+            countTokensJson(toolDefinitions)
+          currentAgentState.contextTokenCount = estimatedTokens
+        }
       }
 
       // 1. Run programmatic step first if it exists
@@ -816,7 +942,8 @@ export async function loopAgentSteps(
         } = programmaticResult
         n = generateN
 
-        currentAgentState = programmaticAgentState
+        Object.assign(initialAgentState, programmaticAgentState)
+        currentAgentState = initialAgentState
         totalSteps = stepNumber
 
         shouldEndTurn = endTurn
@@ -897,7 +1024,8 @@ export async function loopAgentSteps(
         logger.error('No runId found for agent state after finishing agent run')
       }
 
-      currentAgentState = newAgentState
+      Object.assign(initialAgentState, newAgentState)
+      currentAgentState = initialAgentState
       shouldEndTurn = llmShouldEndTurn
       nResponses = generatedResponses
 
@@ -951,7 +1079,6 @@ export async function loopAgentSteps(
           runId,
           totalSteps,
           messageHistory: currentAgentState.messageHistory,
-
         },
         'Agent run cancelled by user (abort error)',
       )
@@ -989,18 +1116,17 @@ export async function loopAgentSteps(
       'Agent execution failed',
     )
 
-    let errorMessage = ''
-    if (error instanceof APICallError) {
-      errorMessage = `${error.message}`
-    } else {
-      // Extract clean error message (just the message, not name:message format)
-      errorMessage =
-        error instanceof Error
-          ? error.message + (error.stack ? `\n\n${error.stack}` : '')
-          : String(error)
-    }
-
-    const statusCode = (error as { statusCode?: number }).statusCode
+    const apiErrorDetails = extractApiErrorDetails(error)
+    const hasServerMessage = apiErrorDetails.message !== undefined
+    const fallbackMessage =
+      error instanceof Error
+        ? error.message +
+          (apiErrorDetails.statusCode === undefined && error.stack
+            ? `\n\n${error.stack}`
+            : '')
+        : String(error)
+    const errorMessage = apiErrorDetails.message ?? fallbackMessage
+    const statusCode = apiErrorDetails.statusCode
 
     const status = signal.aborted ? 'cancelled' : 'failed'
     await finishAgentRun({
@@ -1022,8 +1148,22 @@ export async function loopAgentSteps(
       agentState: currentAgentState,
       output: {
         type: 'error',
-        message: 'Agent run error: ' + errorMessage,
+        message: hasServerMessage
+          ? errorMessage
+          : 'Agent run error: ' + errorMessage,
         ...(statusCode !== undefined && { statusCode }),
+        ...(apiErrorDetails.errorCode !== undefined && {
+          error: apiErrorDetails.errorCode,
+        }),
+        ...(apiErrorDetails.countryCode !== undefined && {
+          countryCode: apiErrorDetails.countryCode,
+        }),
+        ...(apiErrorDetails.countryBlockReason !== undefined && {
+          countryBlockReason: apiErrorDetails.countryBlockReason,
+        }),
+        ...(apiErrorDetails.ipPrivacySignals !== undefined && {
+          ipPrivacySignals: apiErrorDetails.ipPrivacySignals,
+        }),
       },
     }
   }

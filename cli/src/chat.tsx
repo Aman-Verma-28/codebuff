@@ -1,6 +1,6 @@
 import { AnalyticsEvent } from '@codebuff/common/constants/analytics-events'
 import type { FeedbackCategory } from '@codebuff/common/constants/feedback'
-import open from 'open'
+import { safeOpen } from './utils/open-url'
 import {
   useCallback,
   useEffect,
@@ -11,16 +11,16 @@ import {
 } from 'react'
 import { useShallow } from 'zustand/react/shallow'
 
-import { getAdsEnabled, handleAdsDisable } from './commands/ads'
+import { getAdsEnabled } from './commands/ads'
 import { routeUserPrompt, addBashMessageToHistory } from './commands/router'
-import { AdBanner } from './components/ad-banner'
-import { BottomStatusLine } from './components/bottom-status-line'
+import { ChoiceAdBanner } from './components/choice-ad-banner'
 import { ChatInputBar } from './components/chat-input-bar'
 import { LoadPreviousButton } from './components/load-previous-button'
 import { ReviewScreen } from './components/review-screen'
 import { MessageWithAgents } from './components/message-with-agents'
 import { areCreditsRestored } from './components/out-of-credits-banner'
 import { PendingBashMessage } from './components/pending-bash-message'
+import { SessionEndedBanner } from './components/session-ended-banner'
 import { StatusBar } from './components/status-bar'
 import { TopBanner } from './components/top-banner'
 import { getSlashCommandsWithSkills } from './data/slash-commands'
@@ -35,7 +35,6 @@ import { useChatMessages } from './hooks/use-chat-messages'
 import { useChatState } from './hooks/use-chat-state'
 import { useChatStreaming } from './hooks/use-chat-streaming'
 import { useChatUI } from './hooks/use-chat-ui'
-import { useClaudeQuotaQuery } from './hooks/use-claude-quota-query'
 import { useSubscriptionQuery } from './hooks/use-subscription-query'
 import { useClipboard } from './hooks/use-clipboard'
 import { useEvent } from './hooks/use-event'
@@ -55,9 +54,11 @@ import { useMessageBlockStore } from './state/message-block-store'
 import { usePublishStore } from './state/publish-store'
 import { reportActivity } from './utils/activity-tracker'
 import { trackEvent } from './utils/analytics'
-import { getClaudeOAuthStatus } from './utils/claude-oauth'
 import { showClipboardMessage } from './utils/clipboard'
 import { readClipboardImage } from './utils/clipboard-image'
+import { returnToFreebuffLanding } from './hooks/use-freebuff-session'
+import { END_SESSION_MESSAGE, IS_FREEBUFF } from './utils/constants'
+import { getSystemMessage } from './utils/message-history'
 import { getInputModeConfig } from './utils/input-modes'
 
 import {
@@ -68,6 +69,7 @@ import { loadLocalAgents } from './utils/local-agent-registry'
 import { logger } from './utils/logger'
 import {
   addClipboardPlaceholder,
+  addPendingFileFromPath,
   addPendingImageFromFile,
   validateAndAddImage,
 } from './utils/pending-attachments'
@@ -83,6 +85,7 @@ import { computeInputLayoutMetrics } from './utils/text-layout'
 import type { CommandResult } from './commands/command-registry'
 import type { MultilineInputHandle } from './components/multiline-input'
 import type { MatchedSlashCommand } from './hooks/use-suggestion-engine'
+import type { FreebuffSessionResponse } from './types/freebuff-session'
 import type { User } from './utils/auth'
 import type { AgentMode } from './utils/constants'
 import type { FileTreeNode } from '@codebuff/common/util/file'
@@ -105,6 +108,7 @@ export const Chat = ({
   initialMode,
   gitRoot,
   onSwitchToGitRoot,
+  freebuffSession,
 }: {
   headerContent: React.ReactNode
   initialPrompt: string | null
@@ -120,6 +124,7 @@ export const Chat = ({
   initialMode?: AgentMode
   gitRoot?: string | null
   onSwitchToGitRoot?: () => void
+  freebuffSession: FreebuffSessionResponse | null
 }) => {
   const [forceFileOnlyMentions, setForceFileOnlyMentions] = useState(false)
 
@@ -162,17 +167,16 @@ export const Chat = ({
   } = useChatState()
 
   const { statusMessage } = useClipboard()
-  const { ad } = useGravityAd()
-  const [adsManuallyDisabled, setAdsManuallyDisabled] = useState(false)
 
-  const handleDisableAds = useCallback(() => {
-    handleAdsDisable()
-    setAdsManuallyDisabled(true)
-  }, [])
-
-  // Fetch subscription data early - needed for session credits tracking
+  // Fetch subscription data early - needed for session credits tracking and ad gating
   const { data: subscriptionData } = useSubscriptionQuery({
     refetchInterval: 60 * 1000,
+  })
+  const hasSubscription = subscriptionData?.hasSubscription ?? false
+
+  const { ads, recordClick, recordImpression } = useGravityAd({
+    enabled: IS_FREEBUFF || !hasSubscription,
+    provider: 'gravity',
   })
 
   // Set initial mode from CLI flag on mount
@@ -221,16 +225,17 @@ export const Chat = ({
   const loadedSkills = useMemo(() => getLoadedSkills(), [])
 
   // Filter slash commands based on current ads state - only show the option that changes state
+  // Hide both ads commands entirely for subscribers
   // Also merge in skill commands
   const filteredSlashCommands = useMemo(() => {
     const adsEnabled = getAdsEnabled()
     const allCommands = getSlashCommandsWithSkills(loadedSkills)
     return allCommands.filter((cmd) => {
-      if (cmd.id === 'ads:enable') return !adsEnabled
-      if (cmd.id === 'ads:disable') return adsEnabled
+      if (cmd.id === 'ads:enable') return !hasSubscription && !adsEnabled
+      if (cmd.id === 'ads:disable') return !hasSubscription && adsEnabled
       return true
     })
-  }, [inputValue, loadedSkills]) // Re-evaluate when input changes (user may have just toggled)
+  }, [inputValue, loadedSkills, hasSubscription]) // Re-evaluate when input changes (user may have just toggled)
 
   const {
     slashContext,
@@ -583,7 +588,7 @@ export const Chat = ({
       if (index < agentMatches.length) {
         const selected = agentMatches[index]
         if (!selected) return
-        replacement = `@${selected.displayName} `
+        replacement = `@${selected.id} `
       } else {
         const fileIndex = index - agentMatches.length
         const selectedFile = fileMatches[fileIndex]
@@ -611,7 +616,7 @@ export const Chat = ({
     ],
   )
 
-  const { inputWidth, handleBuildFast, handleBuildMax, handleBuildFree } = useChatInput({
+  const { inputWidth, handleBuildFast, handleBuildMax, handleBuildLite } = useChatInput({
     setInputValue,
     agentMode,
     setAgentMode,
@@ -840,6 +845,12 @@ export const Chat = ({
     setInputFocused(true)
   }, [closeReviewScreen, setInputFocused])
 
+  const handleReviewCustom = useCallback(() => {
+    closeReviewScreen()
+    setInputMode('review')
+    setInputFocused(true)
+  }, [closeReviewScreen, setInputMode, setInputFocused])
+
   const handlePublish = useCallback(
     async (agentIds: string[]) => {
       await publishMutation.mutateAsync(agentIds)
@@ -1018,7 +1029,7 @@ export const Chat = ({
           if (index < agentMatches.length) {
             const selected = agentMatches[index]
             if (!selected) return false
-            replacement = `@${selected.displayName} `
+            replacement = `@${selected.id} `
           } else {
             const fileIndex = index - agentMatches.length
             const selectedFile = fileMatches[fileIndex]
@@ -1050,7 +1061,7 @@ export const Chat = ({
         if (index < agentMatches.length) {
           const selected = agentMatches.length > 0 ? (agentMatches[index] || agentMatches[0]) : undefined
           if (!selected) return
-          replacement = `@${selected.displayName} `
+          replacement = `@${selected.id} `
         } else {
           const fileIndex = index - agentMatches.length
           const selectedFile = fileMatches.length > 0 ? (fileMatches[fileIndex] || fileMatches[0]) : undefined
@@ -1126,6 +1137,9 @@ export const Chat = ({
           showClipboardMessage('Failed to add image', { durationMs: 3000 })
         })
       },
+      onPasteFilePath: (filePath: string, isDirectory: boolean) => {
+        addPendingFileFromPath(filePath, isDirectory)
+      },
       onPasteText: (text: string) => {
         setInputValue((prev) => {
           const before = prev.text.slice(0, prev.cursorPosition)
@@ -1147,7 +1161,7 @@ export const Chat = ({
           return
         }
         // Otherwise open the buy credits page
-        open(WEBSITE_URL + '/usage')
+        safeOpen(WEBSITE_URL + '/usage')
       },
     }),
     [
@@ -1230,7 +1244,7 @@ export const Chat = ({
       onToggleCollapsed: handleCollapseToggle,
       onBuildFast: handleBuildFast,
       onBuildMax: handleBuildMax,
-      onBuildFree: handleBuildFree,
+      onBuildLite: handleBuildLite,
       onFeedback: handleMessageFeedback,
       onCloseFeedback: handleCloseFeedback,
     })
@@ -1238,7 +1252,7 @@ export const Chat = ({
     handleCollapseToggle,
     handleBuildFast,
     handleBuildMax,
-    handleBuildFree,
+    handleBuildLite,
     handleMessageFeedback,
     handleCloseFeedback,
     setMessageBlockCallbacks,
@@ -1289,14 +1303,6 @@ export const Chat = ({
   })
   const hasStatusIndicatorContent = statusIndicatorState.kind !== 'idle'
 
-  const isClaudeOAuthActive = getClaudeOAuthStatus().connected
-
-  // Fetch Claude quota when OAuth is active
-  const { data: claudeQuota } = useClaudeQuotaQuery({
-    enabled: isClaudeOAuthActive,
-    refetchInterval: 60 * 1000, // Refetch every 60 seconds
-  })
-
   // Auto-show subscription limit banner when rate limit becomes active
   const subscriptionLimitShownRef = useRef(false)
   const subscriptionRateLimit = subscriptionData?.hasSubscription ? subscriptionData.rateLimit : undefined
@@ -1333,12 +1339,16 @@ export const Chat = ({
     return ` ${segments.join('   ')} `
   }, [queuePreviewTitle, pausedQueueText])
 
+  const hasActiveFreebuffSession =
+    IS_FREEBUFF && freebuffSession?.status === 'active'
+  const isFreebuffSessionOver =
+    IS_FREEBUFF && freebuffSession?.status === 'ended'
   const shouldShowStatusLine =
     !feedbackMode &&
-    (hasStatusIndicatorContent || shouldShowQueuePreview || !isAtBottom)
-
-  // Determine if Claude is actively streaming/waiting
-  const isClaudeActive = isStreaming || isWaitingForResponse
+    (hasStatusIndicatorContent ||
+      shouldShowQueuePreview ||
+      !isAtBottom ||
+      hasActiveFreebuffSession)
 
   // Track mouse movement for ad activity (throttled)
   const lastMouseActivityRef = useRef<number>(0)
@@ -1440,21 +1450,40 @@ export const Chat = ({
             isAtBottom={isAtBottom}
             scrollToLatest={scrollToLatest}
             statusIndicatorState={statusIndicatorState}
+            onStop={chatKeyboardHandlers.onInterruptStream}
+            onEndSession={() => {
+              setMessages((prev) => [
+                ...prev,
+                getSystemMessage(END_SESSION_MESSAGE),
+              ])
+              returnToFreebuffLanding({ resetChat: true }).catch(() => {})
+            }}
+            freebuffSession={freebuffSession}
           />
         )}
 
-        {ad && !adsManuallyDisabled && getAdsEnabled() && (
-          <AdBanner
-            ad={ad}
-            onDisableAds={handleDisableAds}
-            isFreeMode={agentMode === 'FREE'}
+        {ads && (IS_FREEBUFF || getAdsEnabled()) && (
+          <ChoiceAdBanner
+            ads={ads}
+            onClick={recordClick}
+            onImpression={recordImpression}
           />
         )}
 
         {reviewMode ? (
+          // Review and ask_user take precedence over the session-ended banner:
+          // during the grace window the agent may still be asking to run tools
+          // or asking the user a question, and those approvals/answers must be
+          // reachable for the run to finish — otherwise the agent hangs
+          // waiting for input that can never be given.
           <ReviewScreen
             onSelectOption={handleReviewOptionSelect}
+            onCustom={handleReviewCustom}
             onCancel={handleCloseReviewScreen}
+          />
+        ) : isFreebuffSessionOver && !askUserState ? (
+          <SessionEndedBanner
+            isStreaming={isStreaming || isWaitingForResponse}
           />
         ) : (
           <ChatInputBar
@@ -1497,6 +1526,7 @@ export const Chat = ({
               onChange: setInputValue,
               onPasteImage: chatKeyboardHandlers.onPasteImage,
               onPasteImagePath: chatKeyboardHandlers.onPasteImagePath,
+              onPasteFilePath: chatKeyboardHandlers.onPasteFilePath,
               onPasteLongText: (pastedText) => {
                 const id = crypto.randomUUID()
                 const preview = pastedText.slice(0, 100).replace(/\n/g, ' ')
@@ -1514,14 +1544,9 @@ export const Chat = ({
               },
               cwd: getProjectRoot() ?? process.cwd(),
             })}
+            onInterruptStream={chatKeyboardHandlers.onInterruptStream}
           />
         )}
-
-        <BottomStatusLine
-          isClaudeConnected={isClaudeOAuthActive}
-          isClaudeActive={isClaudeActive}
-          claudeQuota={claudeQuota}
-        />
       </box>
     </box>
   )

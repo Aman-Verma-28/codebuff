@@ -18,8 +18,13 @@ export function createThinkerBestOfN(
     model: isGpt5
       ? 'openai/gpt-5.1'
       : isOpus
-        ? 'anthropic/claude-opus-4.6'
+        ? 'anthropic/claude-opus-4.7'
         : 'anthropic/claude-sonnet-4.5',
+    ...(isOpus && {
+      providerOptions: {
+        only: ['amazon-bedrock'],
+      },
+    }),
     displayName: isGpt5
       ? 'Best-of-N GPT-5 Thinker'
       : isOpus

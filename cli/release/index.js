@@ -9,8 +9,70 @@ const path = require('path')
 const zlib = require('zlib')
 
 const tar = require('tar')
+const { createReleaseHttpClient } = require('./http')
 
 const packageName = 'codebuff'
+
+/**
+ * Terminal escape sequences to reset terminal state after the child process exits.
+ * When the binary is SIGKILL'd, it can't clean up its own terminal state.
+ * The wrapper (this process) survives and must reset these modes.
+ */
+const EXIT_ALTERNATE_SCREEN_SEQUENCE = '\x1b[?1049l'
+const SAFE_TERMINAL_RESET_SEQUENCES =
+  '\x1b[?1000l' + // Disable X10 mouse mode
+  '\x1b[?1002l' + // Disable button event mouse mode
+  '\x1b[?1003l' + // Disable any-event mouse mode (all motion)
+  '\x1b[?1006l' + // Disable SGR extended mouse mode
+  '\x1b[?1004l' + // Disable focus reporting
+  '\x1b[?2004l' + // Disable bracketed paste mode
+  '\x1b[?25h' // Show cursor
+
+const FULL_TERMINAL_RESET_SEQUENCES =
+  EXIT_ALTERNATE_SCREEN_SEQUENCE + SAFE_TERMINAL_RESET_SEQUENCES
+
+function resetTerminal(options = {}) {
+  const { exitAlternateScreen = false } = options
+
+  try {
+    if (process.stdin.isTTY && process.stdin.setRawMode) {
+      process.stdin.setRawMode(false)
+    }
+  } catch {
+    // stdin may be closed
+  }
+  try {
+    if (process.stdout.isTTY) {
+      // Exiting the alternate screen is only safe after an interactive child.
+      // Plain CLI paths like --help never enter it, and ?1049l can erase output.
+      process.stdout.write(
+        exitAlternateScreen
+          ? FULL_TERMINAL_RESET_SEQUENCES
+          : SAFE_TERMINAL_RESET_SEQUENCES,
+      )
+    }
+  } catch {
+    // stdout may be closed
+  }
+}
+
+function getUnsignedExitCode(code) {
+  return code != null && code < 0 ? (code >>> 0) : code
+}
+
+function isWindowsNativeCrashCode(code) {
+  const unsignedCode = getUnsignedExitCode(code)
+  return (
+    process.platform === 'win32' &&
+    (unsignedCode === 0xC000001D ||
+      unsignedCode === 0xC0000005 ||
+      unsignedCode === 0xC0000409)
+  )
+}
+
+function shouldExitAlternateScreen(code, signal) {
+  return Boolean(signal) || isWindowsNativeCrashCode(code)
+}
 
 function createConfig(packageName) {
   const homeDir = os.homedir()
@@ -31,6 +93,11 @@ function createConfig(packageName) {
 }
 
 const CONFIG = createConfig(packageName)
+const { getProxyUrl, httpGet } = createReleaseHttpClient({
+  env: process.env,
+  userAgent: CONFIG.userAgent,
+  requestTimeout: CONFIG.requestTimeout,
+})
 
 function getPostHogConfig() {
   const apiKey =
@@ -117,37 +184,6 @@ const term = {
     term.clearLine()
     process.stderr.write(text + '\n')
   },
-}
-
-function httpGet(url, options = {}) {
-  return new Promise((resolve, reject) => {
-    const parsedUrl = new URL(url)
-    const reqOptions = {
-      hostname: parsedUrl.hostname,
-      path: parsedUrl.pathname + parsedUrl.search,
-      headers: {
-        'User-Agent': CONFIG.userAgent,
-        ...options.headers,
-      },
-    }
-
-    const req = https.get(reqOptions, (res) => {
-      if (res.statusCode === 302 || res.statusCode === 301) {
-        return httpGet(new URL(res.headers.location, url).href, options)
-          .then(resolve)
-          .catch(reject)
-      }
-      resolve(res)
-    })
-
-    req.on('error', reject)
-
-    const timeout = options.timeout || CONFIG.requestTimeout
-    req.setTimeout(timeout, () => {
-      req.destroy()
-      reject(new Error('Request timeout.'))
-    })
-  })
 }
 
 async function getLatestVersion() {
@@ -374,6 +410,27 @@ async function downloadBinary(version) {
     }
     fs.renameSync(tempBinaryPath, CONFIG.binaryPath)
 
+    // Move tree-sitter.wasm next to the binary if the tarball included
+    // it. The CLI binary loads this at startup; embedding it inside the
+    // binary itself was unreliable on Windows (bun --compile asset
+    // bundling silently dropped or unbound it across several attempts),
+    // so we ship it as a sibling file instead. Older artifacts that
+    // pre-date this change won't have the wasm and will still install —
+    // they'll just hit the same crash they had before, which is fine.
+    const tempWasmPath = path.join(CONFIG.tempDownloadDir, 'tree-sitter.wasm')
+    if (fs.existsSync(tempWasmPath)) {
+      const targetWasmPath = path.join(
+        path.dirname(CONFIG.binaryPath),
+        'tree-sitter.wasm',
+      )
+      try {
+        if (fs.existsSync(targetWasmPath)) fs.unlinkSync(targetWasmPath)
+      } catch {
+        // best effort; rename below will surface the real error if it matters
+      }
+      fs.renameSync(tempWasmPath, targetWasmPath)
+    }
+
     // Save version metadata for fast version checking
     fs.writeFileSync(
       CONFIG.metadataPath,
@@ -400,6 +457,11 @@ async function ensureBinaryExists() {
   if (!version) {
     console.error('❌ Failed to determine latest version')
     console.error('Please check your internet connection and try again')
+    if (!getProxyUrl()) {
+      console.error(
+        'If you are behind a proxy, set the HTTPS_PROXY environment variable',
+      )
+    }
     process.exit(1)
   }
 
@@ -409,6 +471,11 @@ async function ensureBinaryExists() {
     term.clearLine()
     console.error('❌ Failed to download codebuff:', error.message)
     console.error('Please check your internet connection and try again')
+    if (!getProxyUrl()) {
+      console.error(
+        'If you are behind a proxy, set the HTTPS_PROXY environment variable',
+      )
+    }
     process.exit(1)
   }
 }
@@ -428,29 +495,36 @@ async function checkForUpdates(runningProcess, exitListener) {
       term.clearLine()
 
       runningProcess.removeListener('exit', exitListener)
-      runningProcess.kill('SIGTERM')
 
       await new Promise((resolve) => {
-        runningProcess.on('exit', resolve)
-        setTimeout(() => {
-          if (!runningProcess.killed) {
-            runningProcess.kill('SIGKILL')
-          }
+        let exited = false
+        runningProcess.once('exit', () => {
+          exited = true
           resolve()
+        })
+        runningProcess.kill('SIGTERM')
+        setTimeout(() => {
+          if (!exited) {
+            runningProcess.kill('SIGKILL')
+            // Safety: resolve after giving SIGKILL time to take effect
+            setTimeout(() => resolve(), 1000)
+          }
         }, 5000)
       })
 
+      resetTerminal({ exitAlternateScreen: true })
       console.log(`Update available: ${currentVersion} → ${latestVersion}`)
 
       await downloadBinary(latestVersion)
 
-      const newChild = spawn(CONFIG.binaryPath, process.argv.slice(2), {
-        stdio: 'inherit',
-        detached: false,
-      })
+      const newChild = spawnInstalledBinary({ detached: false })
 
-      newChild.on('exit', (code) => {
-        process.exit(code || 0)
+      newChild.on('exit', (code, signal) => {
+        resetTerminal({
+          exitAlternateScreen: shouldExitAlternateScreen(code, signal),
+        })
+        printCrashDiagnostics(code, signal)
+        process.exit(signal ? 1 : (code || 0))
       })
 
       return new Promise(() => {})
@@ -460,15 +534,131 @@ async function checkForUpdates(runningProcess, exitListener) {
   }
 }
 
-async function main() {
-  await ensureBinaryExists()
+function printCrashDiagnostics(code, signal) {
+  // Windows NTSTATUS codes (unsigned DWORD)
+  const unsignedCode = getUnsignedExitCode(code)
+  const isIllegalInstruction =
+    signal === 'SIGILL' ||
+    (process.platform === 'win32' && unsignedCode === 0xC000001D)
+  const isAccessViolation =
+    signal === 'SIGSEGV' ||
+    (process.platform === 'win32' && unsignedCode === 0xC0000005)
+  const isBusError = signal === 'SIGBUS'
+  const isAbort =
+    signal === 'SIGABRT' ||
+    (process.platform === 'win32' && unsignedCode === 0xC0000409)
+
+  if (!isIllegalInstruction && !isAccessViolation && !isBusError && !isAbort) return
+
+  const exitInfo = signal ? `signal ${signal}` : `code ${code}`
+  console.error('')
+  console.error(`❌ ${packageName} exited immediately (${exitInfo})`)
+  console.error('')
+
+  if (isIllegalInstruction) {
+    console.error('Your CPU may not support the required instruction set (AVX2).')
+    console.error('This typically affects CPUs from before 2013.')
+    console.error('Unfortunately, this binary is not compatible with your system.')
+    console.error('')
+  } else if (isAccessViolation) {
+    console.error('The binary crashed with an access violation.')
+    console.error('')
+  } else if (isBusError) {
+    console.error('The binary crashed with a bus error.')
+    console.error('This may indicate a platform compatibility issue.')
+    console.error('')
+  } else if (isAbort) {
+    console.error('The binary crashed with an abort signal.')
+    console.error('')
+  }
+
+  console.error('System info:')
+  console.error(`  Platform: ${process.platform} ${process.arch}`)
+  console.error(`  Node:     ${process.version}`)
+  console.error(`  Binary:   ${CONFIG.binaryPath}`)
+  console.error('')
+  console.error('Please report this issue at:')
+  console.error('  https://github.com/CodebuffAI/codebuff/issues')
+  console.error('')
+}
+
+function getInstalledBinaryStatus() {
+  try {
+    const stats = fs.statSync(CONFIG.binaryPath)
+    return stats.isFile() ? `yes (${formatBytes(stats.size)})` : 'no'
+  } catch {
+    return 'no'
+  }
+}
+
+function printSpawnFailure(err) {
+  resetTerminal()
+  const code = err && err.code ? ` (${err.code})` : ''
+
+  console.error(`Failed to start ${packageName}: ${err.message}${code}`)
+  console.error('')
+  console.error('System info:')
+  console.error(`  Platform: ${process.platform} ${process.arch}`)
+  console.error(`  Node:     ${process.version}`)
+  console.error(`  Binary:   ${CONFIG.binaryPath}`)
+  console.error(`  Exists:   ${getInstalledBinaryStatus()}`)
+
+  if (process.platform === 'win32') {
+    console.error('')
+    console.error(
+      'On Windows, this can happen when Windows Security or antivirus blocks',
+    )
+    console.error(
+      'or quarantines the downloaded executable, or when the binary requires',
+    )
+    console.error('CPU instructions that are not available on this machine.')
+  }
+
+  console.error('')
+  console.error('Try deleting the downloaded files and running again:')
+  console.error(`  ${CONFIG.configDir}`)
+  console.error('')
+}
+
+function spawnInstalledBinary(options = {}) {
+  if (!fs.existsSync(CONFIG.binaryPath)) {
+    try {
+      if (fs.existsSync(CONFIG.metadataPath)) fs.unlinkSync(CONFIG.metadataPath)
+    } catch {
+      // best effort
+    }
+    const error = new Error(
+      `downloaded binary is missing at ${CONFIG.binaryPath}`,
+    )
+    error.code = 'BINARY_MISSING'
+    printSpawnFailure(error)
+    process.exit(1)
+  }
 
   const child = spawn(CONFIG.binaryPath, process.argv.slice(2), {
     stdio: 'inherit',
+    ...options,
   })
 
-  const exitListener = (code) => {
-    process.exit(code || 0)
+  child.on('error', (err) => {
+    printSpawnFailure(err)
+    process.exit(1)
+  })
+
+  return child
+}
+
+async function main() {
+  await ensureBinaryExists()
+
+  const child = spawnInstalledBinary()
+
+  const exitListener = (code, signal) => {
+    resetTerminal({
+      exitAlternateScreen: shouldExitAlternateScreen(code, signal),
+    })
+    printCrashDiagnostics(code, signal)
+    process.exit(signal ? 1 : (code || 0))
   }
 
   child.on('exit', exitListener)

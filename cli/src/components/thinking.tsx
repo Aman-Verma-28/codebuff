@@ -30,8 +30,16 @@ export const Thinking = memo(
     const theme = useTheme()
     const { contentMaxWidth } = useTerminalDimensions()
 
+    // Special case: single **bold** string under 100 chars gets compact rendering
+    const singleBoldMatch = content.length < 100 ? content.trim().match(/^\*\*([^*]+)\*\*$/) : null
+    if (singleBoldMatch) {
+      return (
+        null
+      )
+    }
+
     const width = Math.max(10, availableWidth ?? contentMaxWidth)
-    // Normalize content to single line for consistent preview
+    // Normalize content to single line for consistent preview (but preserve in expanded mode)
     const normalizedContent = content.replace(/\n+/g, ' ').trim()
     // Account for "..." prefix (3 chars) when calculating line widths
     const effectiveWidth = width - 3
@@ -40,23 +48,23 @@ export const Thinking = memo(
       effectiveWidth,
       PREVIEW_LINE_COUNT,
     )
+    // In expanded mode, preserve original line breaks for proper markdown rendering
+    const expandedContent = content.replace(/\n\n+/g, '\n\n').trim()
 
     const showFull = thinkingCollapseState === 'expanded'
     const showPreview = thinkingCollapseState === 'preview' && lines.length > 0
 
     const toggleIndicator =
       !isThinkingComplete ? '• '
-      : showFull ? '▾ '
-      : showPreview ? '• '
-      : '▸ '
+        : showFull ? '▾ '
+          : showPreview ? '• '
+            : '▸ '
 
     return (
       <Button
         style={{
           flexDirection: 'column',
           gap: 0,
-          marginTop: 0,
-          marginBottom: 0,
         }}
         onClick={onToggle}
       >
@@ -86,7 +94,7 @@ export const Thinking = memo(
               }}
               attributes={TextAttributes.ITALIC}
             >
-              {content}
+              {expandedContent}
             </text>
           </box>
         )}

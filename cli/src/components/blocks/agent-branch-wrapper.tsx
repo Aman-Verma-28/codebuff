@@ -9,7 +9,7 @@ import React, {
 
 import { AgentBlockGrid } from './agent-block-grid'
 import { AgentBranchItem } from './agent-branch-item'
-import { trimTrailingNewlines, sanitizePreview } from './block-helpers'
+import { trimNewlines, sanitizePreview } from './block-helpers'
 import { ContentWithMarkdown } from './content-with-markdown'
 import { ImplementorGroup } from './implementor-row'
 import { ThinkingBlock } from './thinking-block'
@@ -17,13 +17,20 @@ import { ToolBlockGroup } from './tool-block-group'
 import { useTheme } from '../../hooks/use-theme'
 import { useChatStore } from '../../state/chat-store'
 import { isTextBlock } from '../../types/chat'
+import {
+  getAgentDisplayPrompt,
+  getBasherFinishedOutputPreview,
+} from '../../utils/agent-display'
 import { getAgentStatusInfo } from '../../utils/agent-helpers'
-import { extractHtmlBlockMargins } from '../../utils/block-margins'
 import {
   processBlocks,
   type BlockProcessorHandlers,
 } from '../../utils/block-processor'
-import { shouldRenderAsSimpleText, isMultiPromptEditor } from '../../utils/constants'
+import { getCodeSearcherCollapsedPreview } from '../../utils/code-search-summary'
+import {
+  shouldRenderAsSimpleText,
+  isMultiPromptEditor,
+} from '../../utils/constants'
 import {
   isImplementorAgent,
   getImplementorIndex,
@@ -48,10 +55,21 @@ function getCollapsedPreview(
   agentBlock: AgentContentBlock,
   isStreaming: boolean,
   isCollapsed: boolean,
+  availableWidth: number,
 ): string {
   // No preview needed if expanded and not streaming
   if (!isStreaming && !isCollapsed) {
     return ''
+  }
+
+  if (!isStreaming) {
+    const outputPreview = getBasherFinishedOutputPreview(
+      agentBlock,
+      Math.max(24, Math.min(120, availableWidth - 4)),
+    )
+    if (outputPreview) {
+      return outputPreview
+    }
   }
 
   // For multi-prompt editors, try progress-focused preview first
@@ -65,9 +83,15 @@ function getCollapsedPreview(
     }
   }
 
-  // Default preview: use initialPrompt or first line of text content
-  if (agentBlock.initialPrompt) {
-    return sanitizePreview(agentBlock.initialPrompt)
+  const codeSearcherPreview = getCodeSearcherCollapsedPreview(agentBlock)
+  if (codeSearcherPreview) {
+    return codeSearcherPreview
+  }
+
+  // Default preview: use the displayed prompt or first line of text content.
+  const displayPrompt = getAgentDisplayPrompt(agentBlock)
+  if (displayPrompt) {
+    return sanitizePreview(displayPrompt)
   }
 
   const textContent =
@@ -88,7 +112,7 @@ interface AgentBodyProps {
   onToggleCollapsed: (id: string) => void
   onBuildFast: () => void
   onBuildMax: () => void
-  onBuildFree: () => void
+  onBuildLite: () => void
   isLastMessage?: boolean
 }
 
@@ -103,7 +127,7 @@ interface AgentBodyPropsRef {
   onToggleCollapsed: (id: string) => void
   onBuildFast: () => void
   onBuildMax: () => void
-  onBuildFree: () => void
+  onBuildLite: () => void
   isLastMessage?: boolean
   theme: ReturnType<typeof useTheme>
   getAgentMarkdownOptions: (indent: number) => {
@@ -122,7 +146,7 @@ const AgentBody = memo(
     onToggleCollapsed,
     onBuildFast,
     onBuildMax,
-    onBuildFree,
+    onBuildLite,
     isLastMessage,
   }: AgentBodyProps): ReactNode[] => {
     const theme = useTheme()
@@ -159,7 +183,7 @@ const AgentBody = memo(
       onToggleCollapsed,
       onBuildFast,
       onBuildMax,
-      onBuildFree,
+      onBuildLite,
       isLastMessage,
       theme,
       getAgentMarkdownOptions,
@@ -231,7 +255,7 @@ const AgentBody = memo(
                   onToggleCollapsed={p.onToggleCollapsed}
                   onBuildFast={p.onBuildFast}
                   onBuildMax={p.onBuildMax}
-                  onBuildFree={p.onBuildFree}
+                  onBuildLite={p.onBuildLite}
                   siblingBlocks={p.nestedBlocks}
                   isLastMessage={p.isLastMessage}
                 />
@@ -248,11 +272,12 @@ const AgentBody = memo(
             const isNestedStreamingText =
               p.parentIsStreaming || nestedStatus === 'running'
             const filteredNestedContent = isNestedStreamingText
-              ? trimTrailingNewlines(textBlock.content)
+              ? trimNewlines(textBlock.content)
               : textBlock.content.trim()
+            if (!filteredNestedContent) {
+              return null
+            }
             const markdownOptionsForLevel = p.getAgentMarkdownOptions(0)
-            const marginTop = textBlock.marginTop ?? 0
-            const marginBottom = textBlock.marginBottom ?? 0
             const explicitColor = textBlock.color
             const nestedTextColor = explicitColor ?? p.theme.foreground
 
@@ -262,8 +287,6 @@ const AgentBody = memo(
                 style={{
                   wrapMode: 'word',
                   fg: nestedTextColor,
-                  marginTop,
-                  marginBottom,
                 }}
               >
                 <ContentWithMarkdown
@@ -278,8 +301,6 @@ const AgentBody = memo(
 
           if (block.type === 'html') {
             const htmlBlock = block as HtmlContentBlock
-            const { marginTop, marginBottom } =
-              extractHtmlBlockMargins(htmlBlock)
 
             return (
               <box
@@ -287,8 +308,6 @@ const AgentBody = memo(
                 style={{
                   flexDirection: 'column',
                   gap: 0,
-                  marginTop,
-                  marginBottom,
                 }}
               >
                 {htmlBlock.render({
@@ -318,7 +337,7 @@ export interface AgentBranchWrapperProps {
   onToggleCollapsed: (id: string) => void
   onBuildFast: () => void
   onBuildMax: () => void
-  onBuildFree: () => void
+  onBuildLite: () => void
   siblingBlocks?: ContentBlock[]
   isLastMessage?: boolean
 }
@@ -332,7 +351,7 @@ export const AgentBranchWrapper = memo(
     onToggleCollapsed,
     onBuildFast,
     onBuildMax,
-    onBuildFree,
+    onBuildLite,
     siblingBlocks,
     isLastMessage,
   }: AgentBranchWrapperProps) => {
@@ -361,8 +380,12 @@ export const AgentBranchWrapper = memo(
             b.type === 'tool' && b.toolName === 'set_output',
         )
         // set_output wraps data in a 'data' property, so we need to access input.data
-        const outputData = (setOutputBlock?.input as { data?: Record<string, unknown> })?.data
-        const implementationId = outputData?.implementationId as string | undefined
+        const outputData = (
+          setOutputBlock?.input as { data?: Record<string, unknown> }
+        )?.data
+        const implementationId = outputData?.implementationId as
+          | string
+          | undefined
         if (implementationId) {
           const letterIndex = implementationId.charCodeAt(0) - 65
           const implementors = siblingBlocks.filter(
@@ -390,7 +413,6 @@ export const AgentBranchWrapper = memo(
             flexDirection: 'column',
             gap: 0,
             width: '100%',
-            marginTop: 1,
           }}
         >
           <text style={{ wrapMode: 'word' }}>
@@ -419,7 +441,13 @@ export const AgentBranchWrapper = memo(
     const isStreaming = agentBlock.status === 'running' || agentIsStreaming
 
     // Compute collapsed preview text
-    const preview = getCollapsedPreview(agentBlock, isStreaming, isCollapsed)
+    const preview = getCollapsedPreview(
+      agentBlock,
+      isStreaming,
+      isCollapsed,
+      availableWidth,
+    )
+    const displayPrompt = getAgentDisplayPrompt(agentBlock)
 
     const effectiveStatus = isStreaming ? 'running' : agentBlock.status
     const {
@@ -436,7 +464,7 @@ export const AgentBranchWrapper = memo(
       <box key={keyPrefix} style={{ flexDirection: 'column', gap: 0 }}>
         <AgentBranchItem
           name={agentBlock.agentName}
-          prompt={agentBlock.initialPrompt}
+          prompt={displayPrompt}
           agentId={agentBlock.agentId}
           isCollapsed={isCollapsed}
           isStreaming={isStreaming}
@@ -455,7 +483,7 @@ export const AgentBranchWrapper = memo(
             onToggleCollapsed={onToggleCollapsed}
             onBuildFast={onBuildFast}
             onBuildMax={onBuildMax}
-            onBuildFree={onBuildFree}
+            onBuildLite={onBuildLite}
             isLastMessage={isLastMessage}
           />
         </AgentBranchItem>

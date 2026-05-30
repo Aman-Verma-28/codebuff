@@ -1,4 +1,4 @@
-import { searchWeb } from '@codebuff/agent-runtime/llm-api/linkup-api'
+import { searchWeb } from '@codebuff/agent-runtime/llm-api/serper-api'
 import { AnalyticsEvent } from '@codebuff/common/constants/analytics-events'
 import { sleep } from '@codebuff/common/util/promise'
 import { NextResponse } from 'next/server'
@@ -10,7 +10,7 @@ import {
   requireUserFromApiKey,
 } from '../_helpers'
 
-import type { LinkupEnv } from '@codebuff/agent-runtime/llm-api/linkup-api'
+import type { SerperEnv } from '@codebuff/agent-runtime/llm-api/serper-api'
 import type { TrackEventFn } from '@codebuff/common/types/contracts/analytics'
 import type {
   GetUserUsageDataFn,
@@ -21,10 +21,8 @@ import type {
   Logger,
   LoggerWithContextFn,
 } from '@codebuff/common/types/contracts/logger'
+import type { BlockGrantResult } from '@codebuff/billing/subscription'
 import type { NextRequest } from 'next/server'
-
-
-
 
 const bodySchema = z.object({
   query: z.string().min(1, 'query is required'),
@@ -41,7 +39,11 @@ export async function postWebSearch(params: {
   getUserUsageData: GetUserUsageDataFn
   consumeCreditsWithFallback: ConsumeCreditsWithFallbackFn
   fetch: typeof globalThis.fetch
-  serverEnv: LinkupEnv
+  serverEnv: SerperEnv
+  ensureSubscriberBlockGrant?: (params: {
+    userId: string
+    logger: Logger
+  }) => Promise<BlockGrantResult | null>
 }) {
   const {
     req,
@@ -52,6 +54,7 @@ export async function postWebSearch(params: {
     consumeCreditsWithFallback,
     fetch,
     serverEnv,
+    ensureSubscriberBlockGrant,
   } = params
   const baseLogger = params.logger
 
@@ -102,6 +105,7 @@ export async function postWebSearch(params: {
       insufficientCreditsEvent: AnalyticsEvent.WEB_SEARCH_INSUFFICIENT_CREDITS,
       getUserUsageData,
       consumeCreditsWithFallback,
+      ensureSubscriberBlockGrant,
     })
     if (credits.ok) break
     if (attempt < 3) {

@@ -19,6 +19,14 @@ import { ReferralStatusValues } from '../types/referral'
 
 import type { SQL } from 'drizzle-orm'
 import type { AdapterAccount } from 'next-auth/adapters'
+import type {
+  FreebuffCountryBlockReason,
+  FreebuffIpPrivacySignal,
+  FreebuffPrivacyDecision,
+  FreebuffPrivacyProviderDecision,
+  FreebuffScamalyticsStatus,
+  FreebuffSpurStatus,
+} from '@codebuff/common/types/freebuff-session'
 
 export const ReferralStatus = pgEnum('referral_status', [
   ReferralStatusValues[0],
@@ -87,7 +95,9 @@ export const user = pgTable('user', {
   auto_topup_threshold: integer('auto_topup_threshold'),
   auto_topup_amount: integer('auto_topup_amount'),
   banned: boolean('banned').notNull().default(false),
-  fallback_to_a_la_carte: boolean('fallback_to_a_la_carte').notNull().default(false),
+  fallback_to_a_la_carte: boolean('fallback_to_a_la_carte')
+    .notNull()
+    .default(false),
 })
 
 export const account = pgTable(
@@ -232,6 +242,7 @@ export const message = pgTable(
     credits: integer('credits').notNull(),
     byok: boolean('byok').notNull().default(false),
     latency_ms: integer('latency_ms'),
+    ttft_ms: integer('ttft_ms'),
     user_id: text('user_id').references(() => user.id, { onDelete: 'cascade' }),
 
     org_id: text('org_id').references(() => org.id, { onDelete: 'cascade' }),
@@ -248,16 +259,27 @@ export const message = pgTable(
   ],
 )
 
-export const session = pgTable('session', {
-  sessionToken: text('sessionToken').notNull().primaryKey(),
-  userId: text('userId')
-    .notNull()
-    .references(() => user.id, { onDelete: 'cascade' }),
-  expires: timestamp('expires', { mode: 'date' }).notNull(),
-  fingerprint_id: text('fingerprint_id').references(() => fingerprint.id),
-  type: sessionTypeEnum('type').notNull().default('web'),
-  created_at: timestamp('created_at', { mode: 'date' }).notNull().defaultNow(),
-})
+export const session = pgTable(
+  'session',
+  {
+    sessionToken: text('sessionToken').notNull().primaryKey(),
+    userId: text('userId')
+      .notNull()
+      .references(() => user.id, { onDelete: 'cascade' }),
+    expires: timestamp('expires', { mode: 'date' }).notNull(),
+    fingerprint_id: text('fingerprint_id').references(() => fingerprint.id),
+    cli_auth_hash: text('cli_auth_hash'),
+    type: sessionTypeEnum('type').notNull().default('web'),
+    created_at: timestamp('created_at', { mode: 'date' })
+      .notNull()
+      .defaultNow(),
+  },
+  (table) => [
+    uniqueIndex('session_cli_auth_code_idx')
+      .on(table.fingerprint_id, table.cli_auth_hash)
+      .where(sql`${table.cli_auth_hash} IS NOT NULL`),
+  ],
+)
 
 export const verificationToken = pgTable(
   'verificationToken',
@@ -282,6 +304,19 @@ export const encryptedApiKeys = pgTable(
     pk: primaryKey({ columns: [table.user_id, table.type] }),
   }),
 )
+
+export const composioSession = pgTable('composio_session', {
+  user_id: text('user_id')
+    .primaryKey()
+    .references(() => user.id, { onDelete: 'cascade' }),
+  session_id: text('session_id').notNull().unique(),
+  created_at: timestamp('created_at', { mode: 'date', withTimezone: true })
+    .notNull()
+    .defaultNow(),
+  updated_at: timestamp('updated_at', { mode: 'date', withTimezone: true })
+    .notNull()
+    .defaultNow(),
+})
 
 // Organization tables
 export const orgRoleEnum = pgEnum('org_role', ['owner', 'admin', 'member'])
@@ -430,7 +465,10 @@ export const adImpression = pgTable(
       .notNull()
       .references(() => user.id, { onDelete: 'cascade' }),
 
-    // Ad content from Gravity API
+    // Which upstream ad network served this ad ('gravity', 'carbon', 'zeroclick', ...)
+    provider: text('provider').notNull().default('gravity'),
+
+    // Ad content (normalized across providers)
     ad_text: text('ad_text').notNull(),
     title: text('title').notNull(),
     cta: text('cta').notNull().default(''),
@@ -438,7 +476,13 @@ export const adImpression = pgTable(
     favicon: text('favicon').notNull(),
     click_url: text('click_url').notNull(),
     imp_url: text('imp_url').notNull().unique(), // Unique to prevent duplicates
-    payout: numeric('payout', { precision: 10, scale: 6 }).notNull(),
+    // Extra tracking pixel URLs (e.g. Carbon's `pixel` field, `||`-separated).
+    // Each string may contain `[timestamp]` which is substituted at fire time.
+    extra_pixels: text('extra_pixels').array(),
+    // Payout is Gravity-shaped; Carbon uses CPM and reports no per-impression
+    // payout, so this is nullable to avoid polluting revenue dashboards with
+    // fake numbers.
+    payout: numeric('payout', { precision: 10, scale: 6 }),
 
     // Credit tracking
     credits_granted: integer('credits_granted').notNull(),
@@ -792,5 +836,211 @@ export const agentStep = pgTable(
     // Performance indices
     index('idx_agent_step_run_id').on(table.agent_run_id),
     index('idx_agent_step_children_gin').using('gin', table.child_run_ids),
+  ],
+)
+
+export const freeSessionStatusEnum = pgEnum('free_session_status', [
+  'queued',
+  'active',
+])
+export const freebuffAccessTierEnum = pgEnum('freebuff_access_tier', [
+  'full',
+  'limited',
+])
+
+/**
+ * Free-user session / waiting-room state. One row per user is enforced by the
+ * PK on user_id so a single account cannot occupy multiple active sessions.
+ *
+ * Status transitions:
+ *   none  → (POST /session)        → queued
+ *   queued → (admission tick)      → active
+ *   active → (expires_at in past)  → treated as expired; next POST re-queues
+ *   any   → (DELETE /session)      → row removed
+ *
+ * active_instance_id is server-generated on every POST /session and rotates
+ * when a new CLI takes over. Chat completions requires a matching
+ * active_instance_id so prior instances stop serving requests.
+ */
+export const freeSession = pgTable(
+  'free_session',
+  {
+    user_id: text('user_id')
+      .primaryKey()
+      .references(() => user.id, { onDelete: 'cascade' }),
+    status: freeSessionStatusEnum('status').notNull(),
+    active_instance_id: text('active_instance_id').notNull(),
+    /** Which freebuff model this row is queued for / locked to. Each model has
+     *  its own queue (admission picks one queued user per model per tick) and
+     *  the model is fixed for the life of an active session. */
+    model: text('model').notNull(),
+    access_tier: freebuffAccessTierEnum('access_tier')
+      .notNull()
+      .default('full'),
+    /** Resolved country/privacy metadata from the latest successful
+     *  free-session POST country gate. Raw IP is not stored; `client_ip_hash`
+     *  is HMAC-SHA256 with the server auth secret for correlation only. */
+    country_code: text('country_code'),
+    cf_country: text('cf_country'),
+    geoip_country: text('geoip_country'),
+    country_block_reason: text(
+      'country_block_reason',
+    ).$type<FreebuffCountryBlockReason | null>(),
+    ip_privacy_signals: text('ip_privacy_signals')
+      .array()
+      .$type<FreebuffIpPrivacySignal[] | null>(),
+    client_ip_hash: text('client_ip_hash'),
+    country_checked_at: timestamp('country_checked_at', {
+      mode: 'date',
+      withTimezone: true,
+    }),
+    queued_at: timestamp('queued_at', {
+      mode: 'date',
+      withTimezone: true,
+    })
+      .notNull()
+      .defaultNow(),
+    admitted_at: timestamp('admitted_at', {
+      mode: 'date',
+      withTimezone: true,
+    }),
+    expires_at: timestamp('expires_at', {
+      mode: 'date',
+      withTimezone: true,
+    }),
+    created_at: timestamp('created_at', {
+      mode: 'date',
+      withTimezone: true,
+    })
+      .notNull()
+      .defaultNow(),
+    updated_at: timestamp('updated_at', {
+      mode: 'date',
+      withTimezone: true,
+    })
+      .notNull()
+      .defaultNow(),
+  },
+  (table) => [
+    // Per-model dequeue: WHERE status='queued' AND model=$1 ORDER BY queued_at
+    index('idx_free_session_queue').on(
+      table.status,
+      table.model,
+      table.queued_at,
+    ),
+    // Expiry sweep: SELECT ... WHERE status='active' AND expires_at < now()
+    index('idx_free_session_expiry').on(table.expires_at),
+  ],
+)
+
+/**
+ * Shared cache for free-mode country/privacy decisions. Raw IP addresses are
+ * never persisted; client_ip_hash is HMAC-SHA256 with the server auth secret.
+ */
+export const freeModeCountryAccessCache = pgTable(
+  'free_mode_country_access_cache',
+  {
+    user_id: text('user_id')
+      .notNull()
+      .references(() => user.id, { onDelete: 'cascade' }),
+    client_ip_hash: text('client_ip_hash').notNull(),
+    allowed: boolean('allowed').notNull(),
+    country_code: text('country_code'),
+    cf_country: text('cf_country'),
+    geoip_country: text('geoip_country'),
+    country_block_reason: text(
+      'country_block_reason',
+    ).$type<FreebuffCountryBlockReason | null>(),
+    ip_privacy_signals: text('ip_privacy_signals')
+      .array()
+      .$type<FreebuffIpPrivacySignal[] | null>(),
+    spur_ip_privacy_signals: text('spur_ip_privacy_signals')
+      .array()
+      .$type<FreebuffIpPrivacySignal[] | null>(),
+    spur_status: text('spur_status').$type<FreebuffSpurStatus | null>(),
+    scamalytics_ip_privacy_signals: text('scamalytics_ip_privacy_signals')
+      .array()
+      .$type<FreebuffIpPrivacySignal[] | null>(),
+    scamalytics_status: text(
+      'scamalytics_status',
+    ).$type<FreebuffScamalyticsStatus | null>(),
+    scamalytics_score: integer('scamalytics_score'),
+    scamalytics_risk: text('scamalytics_risk'),
+    risk_score: integer('risk_score'),
+    privacy_decision: text(
+      'privacy_decision',
+    ).$type<FreebuffPrivacyDecision | null>(),
+    privacy_provider_decision: text(
+      'privacy_provider_decision',
+    ).$type<FreebuffPrivacyProviderDecision | null>(),
+    checked_at: timestamp('checked_at', {
+      mode: 'date',
+      withTimezone: true,
+    }).notNull(),
+    expires_at: timestamp('expires_at', {
+      mode: 'date',
+      withTimezone: true,
+    }).notNull(),
+    created_at: timestamp('created_at', {
+      mode: 'date',
+      withTimezone: true,
+    })
+      .notNull()
+      .defaultNow(),
+    updated_at: timestamp('updated_at', {
+      mode: 'date',
+      withTimezone: true,
+    })
+      .notNull()
+      .defaultNow(),
+  },
+  (table) => [
+    primaryKey({ columns: [table.user_id, table.client_ip_hash] }),
+    index('idx_free_mode_country_cache_expires_at').on(table.expires_at),
+  ],
+)
+
+/**
+ * Audit log of every admission — one row per queued→active transition. Used
+ * to track shared premium-session usage for Freebuff's 5 sessions per Pacific
+ * day allowance. `session_units` starts at 1.0 and may be reduced when users
+ * end active sessions early.
+ *
+ * Separate from `free_session` because that table is one-row-per-user (state,
+ * not history); the UPSERT path there would otherwise destroy prior admissions.
+ */
+export const freeSessionAdmit = pgTable(
+  'free_session_admit',
+  {
+    id: text('id')
+      .primaryKey()
+      .$defaultFn(() => crypto.randomUUID()),
+    user_id: text('user_id')
+      .notNull()
+      .references(() => user.id, { onDelete: 'cascade' }),
+    model: text('model').notNull(),
+    access_tier: freebuffAccessTierEnum('access_tier')
+      .notNull()
+      .default('full'),
+    admitted_at: timestamp('admitted_at', {
+      mode: 'date',
+      withTimezone: true,
+    })
+      .notNull()
+      .defaultNow(),
+    session_units: numeric('session_units', {
+      precision: 3,
+      scale: 1,
+    })
+      .notNull()
+      .default('1.0'),
+  },
+  (table) => [
+    // Rate-limit lookup: WHERE user_id=$1 AND model=$2 AND admitted_at > $cutoff
+    index('idx_free_session_admit_user_model_time').on(
+      table.user_id,
+      table.model,
+      table.admitted_at,
+    ),
   ],
 )

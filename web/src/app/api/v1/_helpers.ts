@@ -1,4 +1,3 @@
-
 import { NextResponse } from 'next/server'
 
 import type { AnalyticsEvent } from '@codebuff/common/constants/analytics-events'
@@ -24,7 +23,6 @@ export interface UserInfo {
   id: string
   email: string
   discord_id: string | null
-  referral_code?: string | null
   stripe_customer_id?: string | null
   banned?: boolean
 }
@@ -41,7 +39,8 @@ export const parseJsonBody = async <T>(params: {
   validationErrorEvent: AnalyticsEvent
   userId?: string
 }): Promise<HandlerResult<T>> => {
-  const { req, schema, logger, trackEvent, validationErrorEvent, userId } = params
+  const { req, schema, logger, trackEvent, validationErrorEvent, userId } =
+    params
   const trackingUserId = userId ?? 'unknown'
 
   let json: unknown
@@ -152,6 +151,10 @@ export const checkCreditsAndCharge = async (params: {
   insufficientCreditsEvent: AnalyticsEvent
   getUserUsageData: GetUserUsageDataFn
   consumeCreditsWithFallback: ConsumeCreditsWithFallbackFn
+  ensureSubscriberBlockGrant?: (params: {
+    userId: string
+    logger: Logger
+  }) => Promise<unknown>
 }): Promise<HandlerResult<{ creditsUsed: number }>> => {
   const {
     userId,
@@ -164,12 +167,34 @@ export const checkCreditsAndCharge = async (params: {
     insufficientCreditsEvent,
     getUserUsageData,
     consumeCreditsWithFallback,
+    ensureSubscriberBlockGrant,
   } = params
+
+  if (creditsToCharge <= 0) {
+    return { ok: true, data: { creditsUsed: 0 } }
+  }
+
+  // Ensure subscription block grant exists before checking credits.
+  // This creates the grant (if eligible) so its credits appear in the balance below.
+  // When the function is provided, always include subscription credits in the balance:
+  // error/null results mean subscription grants have 0 balance, so including them is harmless.
+  const includeSubscriptionCredits = !!ensureSubscriberBlockGrant
+  if (ensureSubscriberBlockGrant) {
+    try {
+      await ensureSubscriberBlockGrant({ userId, logger })
+    } catch (error) {
+      logger.error(
+        { error, userId },
+        'Error ensuring subscription block grant in credit check',
+      )
+      // Fail open: proceed with subscription credits included in balance check
+    }
+  }
 
   const {
     balance: { totalRemaining },
     nextQuotaReset,
-  } = await getUserUsageData({ userId, logger })
+  } = await getUserUsageData({ userId, logger, includeSubscriptionCredits })
 
   if (totalRemaining <= 0 || totalRemaining < creditsToCharge) {
     trackEvent({

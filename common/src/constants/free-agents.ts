@@ -1,5 +1,15 @@
 import { parseAgentId } from '../util/agent-id-parsing'
 
+import { FREEBUFF_GEMINI_THINKER_AGENT_ID } from './freebuff-gemini-thinker'
+import {
+  FREEBUFF_DEEPSEEK_V4_FLASH_MODEL_ID,
+  FREEBUFF_DEEPSEEK_V4_PRO_MODEL_ID,
+  FREEBUFF_GEMINI_PRO_MODEL_ID,
+  FREEBUFF_KIMI_MODEL_ID,
+  FREEBUFF_MINIMAX_MODEL_ID,
+  SUPPORTED_FREEBUFF_MODELS,
+} from './freebuff-models'
+
 import type { CostMode } from './model-config'
 
 /**
@@ -7,6 +17,43 @@ import type { CostMode } from './model-config'
  * Only allowlisted agent+model combinations cost 0 credits in this mode.
  */
 export const FREE_COST_MODE = 'free' as const
+
+/**
+ * Root-orchestrator agent IDs counted as "a freebuff session" for abuse
+ * detection and usage auditing. Subagents (file-picker, basher, etc.) are
+ * excluded — they're spawned by the root, so counting them would inflate
+ * every user's apparent activity.
+ */
+export const FREEBUFF_ROOT_AGENT_IDS = [
+  'base2-free',
+  'base2-free-kimi',
+  'base2-free-deepseek',
+  'base2-free-deepseek-flash',
+] as const
+const FREEBUFF_ROOT_AGENT_ID_SET: ReadonlySet<string> = new Set(
+  FREEBUFF_ROOT_AGENT_IDS,
+)
+const FREEBUFF_ALLOWED_MODEL_IDS = SUPPORTED_FREEBUFF_MODELS.map(
+  (model) => model.id,
+)
+
+export const FREEBUFF_ROOT_AGENT_ID_BY_MODEL: Record<string, string> = {
+  [FREEBUFF_MINIMAX_MODEL_ID]: 'base2-free',
+  [FREEBUFF_KIMI_MODEL_ID]: 'base2-free-kimi',
+  [FREEBUFF_DEEPSEEK_V4_PRO_MODEL_ID]: 'base2-free-deepseek',
+  [FREEBUFF_DEEPSEEK_V4_FLASH_MODEL_ID]: 'base2-free-deepseek-flash',
+}
+
+export const FREEBUFF_REVIEWER_AGENT_ID_BY_MODEL: Record<string, string> = {
+  [FREEBUFF_MINIMAX_MODEL_ID]: 'code-reviewer-minimax',
+  [FREEBUFF_KIMI_MODEL_ID]: 'code-reviewer-kimi',
+  [FREEBUFF_DEEPSEEK_V4_PRO_MODEL_ID]: 'code-reviewer-deepseek',
+  [FREEBUFF_DEEPSEEK_V4_FLASH_MODEL_ID]: 'code-reviewer-deepseek-flash',
+}
+
+export function getFreebuffRootAgentIdForModel(model: string): string {
+  return FREEBUFF_ROOT_AGENT_ID_BY_MODEL[model] ?? 'base2-free'
+}
 
 /**
  * Agents that are allowed to run in FREE mode.
@@ -18,25 +65,50 @@ export const FREE_COST_MODE = 'free' as const
  */
 export const FREE_MODE_AGENT_MODELS: Record<string, Set<string>> = {
   // Root orchestrator
-  'base2-free': new Set(['minimax/minimax-m2.5']),
+  'base2-free': new Set([
+    FREEBUFF_MINIMAX_MODEL_ID,
+    FREEBUFF_DEEPSEEK_V4_PRO_MODEL_ID,
+    FREEBUFF_DEEPSEEK_V4_FLASH_MODEL_ID,
+    FREEBUFF_KIMI_MODEL_ID,
+  ]),
+  'base2-free-kimi': new Set([FREEBUFF_KIMI_MODEL_ID]),
+  'base2-free-deepseek': new Set([FREEBUFF_DEEPSEEK_V4_PRO_MODEL_ID]),
+  'base2-free-deepseek-flash': new Set([FREEBUFF_DEEPSEEK_V4_FLASH_MODEL_ID]),
 
   // File exploration agents
   'file-picker': new Set(['google/gemini-2.5-flash-lite']),
-  'file-picker-max': new Set(['x-ai/grok-4.1-fast']),
-  'file-lister': new Set(['x-ai/grok-4.1-fast']),
+  'file-picker-max': new Set(['google/gemini-3.1-flash-lite-preview']),
+  'file-lister': new Set(['google/gemini-3.1-flash-lite-preview']),
 
   // Research agents
-  'researcher-web': new Set(['x-ai/grok-4.1-fast']),
-  'researcher-docs': new Set(['x-ai/grok-4.1-fast']),
+  'researcher-web': new Set(['google/gemini-3.1-flash-lite-preview']),
+  'researcher-docs': new Set(['google/gemini-3.1-flash-lite-preview']),
+
+  // Browser automation
+  'browser-use': new Set(['google/gemini-3.1-flash-lite-preview']),
 
   // Command execution
-  'commander-lite': new Set(['x-ai/grok-4.1-fast']),
-
-  // Editor for free mode
-  'editor-lite': new Set(['minimax/minimax-m2.5']),
+  basher: new Set(['google/gemini-3.1-flash-lite-preview']),
+  'tmux-cli': new Set([FREEBUFF_MINIMAX_MODEL_ID]),
 
   // Code reviewer for free mode
-  'code-reviewer-lite': new Set(['minimax/minimax-m2.5']),
+  'code-reviewer-minimax': new Set([FREEBUFF_MINIMAX_MODEL_ID]),
+  'code-reviewer-kimi': new Set([FREEBUFF_KIMI_MODEL_ID]),
+  'code-reviewer-deepseek': new Set([FREEBUFF_DEEPSEEK_V4_PRO_MODEL_ID]),
+  'code-reviewer-deepseek-flash': new Set([
+    FREEBUFF_DEEPSEEK_V4_FLASH_MODEL_ID,
+  ]),
+  // Legacy freebuff clients spawned code-reviewer-lite under provider-specific
+  // free roots before those reviewer IDs existed.
+  'code-reviewer-lite': new Set([
+    FREEBUFF_MINIMAX_MODEL_ID,
+    FREEBUFF_KIMI_MODEL_ID,
+    FREEBUFF_DEEPSEEK_V4_PRO_MODEL_ID,
+    FREEBUFF_DEEPSEEK_V4_FLASH_MODEL_ID,
+  ]),
+
+  // Legacy: kept for the standalone gemini thinker agent if invoked directly.
+  [FREEBUFF_GEMINI_THINKER_AGENT_ID]: new Set([FREEBUFF_GEMINI_PRO_MODEL_ID]),
 }
 
 /**
@@ -70,6 +142,34 @@ export function isFreeMode(costMode: CostMode | string | undefined): boolean {
   return costMode === FREE_COST_MODE
 }
 
+export function isFreebuffRootAgent(fullAgentId: string): boolean {
+  const { publisherId, agentId } = parseAgentId(fullAgentId)
+  if (!agentId) return false
+  if (publisherId && publisherId !== 'codebuff') return false
+  return FREEBUFF_ROOT_AGENT_ID_SET.has(agentId)
+}
+
+export function isFreebuffGeminiThinkerAgent(fullAgentId: string): boolean {
+  const { publisherId, agentId } = parseAgentId(fullAgentId)
+  if (!agentId) return false
+  if (publisherId && publisherId !== 'codebuff') return false
+  return agentId === FREEBUFF_GEMINI_THINKER_AGENT_ID
+}
+
+export function shouldUseLocalTokenCountForFreebuffDeepseekFlash(params: {
+  agentId: string | undefined
+  model: string | undefined
+}): boolean {
+  const { agentId: fullAgentId, model } = params
+  if (!fullAgentId || model !== FREEBUFF_DEEPSEEK_V4_FLASH_MODEL_ID) {
+    return false
+  }
+
+  const { publisherId, agentId } = parseAgentId(fullAgentId)
+  if (publisherId && publisherId !== 'codebuff') return false
+  return agentId === 'base2-free-deepseek-flash'
+}
+
 /**
  * Check if a specific agent is allowed to use a specific model in FREE mode.
  * This is the strictest check - validates both the agent AND model combination.
@@ -100,7 +200,16 @@ export function isFreeModeAllowedAgentModel(
   // For these, any model check should fail (they shouldn't be making LLM calls)
   if (allowedModels.size === 0) return false
 
-  return allowedModels.has(model)
+  // Exact match first
+  if (allowedModels.has(model)) return true
+
+  // OpenRouter may return dated variants (e.g. "minimax/minimax-m2.7-20260211")
+  // so also check if the returned model starts with any allowed model prefix.
+  for (const allowed of allowedModels) {
+    if (model.startsWith(allowed + '-')) return true
+  }
+
+  return false
 }
 
 /**

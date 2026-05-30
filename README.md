@@ -1,6 +1,10 @@
-# Codebuff
+# Codebuff & Freebuff
 
-Codebuff is an **open-source AI coding assistant** that edits your codebase through natural language instructions. Instead of using one model for everything, it coordinates specialized agents that work together to understand your project and make precise changes.
+English | [简体中文](./README.zh-CN.md)
+
+**[Codebuff](https://codebuff.com)** is an open-source AI coding assistant that edits your codebase through natural language instructions. **[Freebuff](https://www.npmjs.com/package/freebuff)** is the free, ad-supported version — no subscription, no credits, no configuration.
+
+Instead of using one model for everything, Codebuff coordinates specialized agents that work together to understand your project and make precise changes.
 
 <div align="center">
   <img src="./assets/codebuff-vs-claude-code.png" alt="Codebuff vs Claude Code" width="400">
@@ -198,6 +202,18 @@ await client.run({
 
 Learn more about the SDK [here](https://www.npmjs.com/package/@codebuff/sdk).
 
+## Freebuff: The free coding agent
+
+Don't want a subscription? **[Freebuff](https://www.npmjs.com/package/freebuff)** is a free variant of Codebuff — no subscription, no credits, no configuration. Just install and start coding.
+
+```bash
+npm install -g freebuff
+cd your-project
+freebuff
+```
+
+Freebuff is ad-supported and uses models optimized for fast, high-quality assistance. It includes built-in web research, browser use, and more. Learn more in the [Freebuff README](./freebuff/README.md).
+
 ## Why choose Codebuff
 
 **Custom workflows**: TypeScript generators let you mix AI generation with programmatic control. Agents can spawn subagents, branch on conditions, and run multi-step processes.
@@ -207,6 +223,19 @@ Learn more about the SDK [here](https://www.npmjs.com/package/@codebuff/sdk).
 **Reuse any published agent**: Compose existing [published agents](https://www.codebuff.com/store) to get a leg up. Codebuff agents are the new MCP!
 
 **SDK**: Build Codebuff into your applications. Create custom tools, integrate with CI/CD, or embed coding assistance into your products.
+
+## Advanced Usage
+
+### Custom Agent Workflows
+
+Create your own agents with specialized workflows using the `/init` command:
+
+```bash
+codebuff
+/init
+```
+
+This creates a custom agent structure in `.agents/` that you can customize.
 
 ## Contributing to Codebuff
 
@@ -253,6 +282,8 @@ Some ways you can help:
 **CLI**: `npm install -g codebuff`
 
 **SDK**: `npm install @codebuff/sdk`
+
+**Freebuff (free)**: `npm install -g freebuff`
 
 ### Resources
 

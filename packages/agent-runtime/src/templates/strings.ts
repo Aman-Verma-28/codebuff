@@ -29,6 +29,14 @@ import type {
   ProjectFileContext,
 } from '@codebuff/common/util/file'
 
+export function formatCurrentDate(date: Date): string {
+  return new Intl.DateTimeFormat('en-US', {
+    year: 'numeric',
+    month: 'long',
+    day: 'numeric',
+  }).format(date)
+}
+
 export async function formatPrompt(
   params: {
     prompt: string
@@ -85,6 +93,7 @@ export async function formatPrompt(
   const toInject: Record<PlaceholderValue, () => string | Promise<string>> = {
     [PLACEHOLDER.AGENT_NAME]: () =>
       agentTemplate ? agentTemplate.displayName || 'Unknown Agent' : 'Buffy',
+    [PLACEHOLDER.CURRENT_DATE]: () => formatCurrentDate(new Date()),
     [PLACEHOLDER.FILE_TREE_PROMPT_SMALL]: () =>
       getProjectFileTreePrompt({
         fileContext,
@@ -226,7 +235,7 @@ export async function getAgentPrompt<T extends StringField>(
     if (outputSchema) {
       addendum += '\n\n## Output Schema\n\n'
       addendum +=
-        'When using the set_output tool, your output must conform to this schema:\n\n'
+        'When using the set_output tool, your output must conform to this schema. You may pass the fields either directly as top-level parameters or inside a `data` field — both are accepted.\n\n'
       addendum += '```json\n'
       try {
         // Convert Zod schema to JSON schema for display

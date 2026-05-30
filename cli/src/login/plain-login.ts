@@ -1,9 +1,10 @@
 import { cyan, green, red, yellow, bold } from 'picocolors'
 
-import { WEBSITE_URL } from './constants'
+import { LOGIN_WEBSITE_URL } from './constants'
 import { generateLoginUrl, pollLoginStatus } from './login-flow'
-import { generateFingerprintId } from './utils'
 import { saveUserCredentials } from '../utils/auth'
+import { IS_FREEBUFF } from '../utils/constants'
+import { getFingerprintId } from '../utils/fingerprint'
 import { logger } from '../utils/logger'
 
 import type { User } from '../utils/auth'
@@ -17,10 +18,10 @@ import type { User } from '../utils/auth'
  * clipboard and browser integration don't work.
  */
 export async function runPlainLogin(): Promise<void> {
-  const fingerprintId = generateFingerprintId()
+  const fingerprintId = await getFingerprintId()
 
   console.log()
-  console.log(bold('Codebuff Login'))
+  console.log(bold(IS_FREEBUFF ? 'Freebuff Login' : 'Codebuff Login'))
   console.log()
   console.log('Generating login URL...')
 
@@ -28,7 +29,7 @@ export async function runPlainLogin(): Promise<void> {
   try {
     loginData = await generateLoginUrl(
       { logger },
-      { baseUrl: WEBSITE_URL, fingerprintId },
+      { baseUrl: LOGIN_WEBSITE_URL, fingerprintId },
     )
   } catch (error) {
     console.error(
@@ -58,7 +59,7 @@ export async function runPlainLogin(): Promise<void> {
   const result = await pollLoginStatus(
     { sleep, logger },
     {
-      baseUrl: WEBSITE_URL,
+      baseUrl: LOGIN_WEBSITE_URL,
       fingerprintId,
       fingerprintHash: loginData.fingerprintHash,
       expiresAt: loginData.expiresAt,
@@ -71,7 +72,8 @@ export async function runPlainLogin(): Promise<void> {
     console.log()
     console.log(green(`✓ Logged in as ${user.name} (${user.email})`))
     console.log()
-    console.log('You can now run ' + cyan('codebuff') + ' to start.')
+    const cliName = IS_FREEBUFF ? 'freebuff' : 'codebuff'
+    console.log('You can now run ' + cyan(cliName) + ' to start.')
     process.exit(0)
   } else if (result.status === 'timeout') {
     console.error(red('Login timed out. Please try again.'))

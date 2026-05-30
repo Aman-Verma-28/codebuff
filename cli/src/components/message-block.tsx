@@ -4,6 +4,7 @@ import { memo, useState } from 'react'
 import { BlocksRenderer } from './blocks/blocks-renderer'
 import { UserContentWithCopyButton } from './blocks/user-content-copy'
 import { Button } from './button'
+import { FileAttachmentCard } from './file-attachment-card'
 import { ImageCard } from './image-card'
 import { MessageFooter } from './message-footer'
 import { TextAttachmentCard } from './text-attachment-card'
@@ -19,6 +20,7 @@ import type { FeedbackCategory } from '@codebuff/common/constants/feedback'
 
 import type {
   ContentBlock,
+  FileAttachment,
   ImageAttachment,
   TextAttachment,
   ChatMessageMetadata,
@@ -45,7 +47,7 @@ interface MessageBlockProps {
   onToggleCollapsed: (id: string) => void
   onBuildFast: () => void
   onBuildMax: () => void
-  onBuildFree: () => void
+  onBuildLite: () => void
   onFeedback?: (messageId: string) => void
   onCloseFeedback?: () => void
   validationErrors?: Array<{ id: string; message: string }>
@@ -58,6 +60,7 @@ interface MessageBlockProps {
   }) => void
   attachments?: ImageAttachment[]
   textAttachments?: TextAttachment[]
+  fileAttachments?: FileAttachment[]
   metadata?: ChatMessageMetadata
   isLastMessage?: boolean
 }
@@ -65,11 +68,13 @@ interface MessageBlockProps {
 const MessageAttachments = memo(({
   imageAttachments,
   textAttachments,
+  fileAttachments,
 }: {
   imageAttachments: ImageAttachment[]
   textAttachments: TextAttachment[]
+  fileAttachments: FileAttachment[]
 }) => {
-  if (imageAttachments.length === 0 && textAttachments.length === 0) {
+  if (imageAttachments.length === 0 && textAttachments.length === 0 && fileAttachments.length === 0) {
     return null
   }
 
@@ -91,6 +96,13 @@ const MessageAttachments = memo(({
       {textAttachments.map((attachment) => (
         <TextAttachmentCard
           key={attachment.id}
+          attachment={attachment}
+          showRemoveButton={false}
+        />
+      ))}
+      {fileAttachments.map((attachment) => (
+        <FileAttachmentCard
+          key={attachment.path}
           attachment={attachment}
           showRemoveButton={false}
         />
@@ -119,7 +131,7 @@ export const MessageBlock = memo(({
   onToggleCollapsed,
   onBuildFast,
   onBuildMax,
-  onBuildFree,
+  onBuildLite,
   onFeedback,
   onCloseFeedback,
   validationErrors,
@@ -127,6 +139,7 @@ export const MessageBlock = memo(({
   onOpenFeedback,
   attachments,
   textAttachments,
+  fileAttachments,
   metadata,
   isLastMessage,
 }: MessageBlockProps) => {
@@ -157,7 +170,7 @@ export const MessageBlock = memo(({
       onToggleCollapsed,
       onBuildFast,
       onBuildMax,
-      onBuildFree,
+      onBuildLite,
       onFeedback,
       onCloseFeedback,
       validationErrors,
@@ -264,9 +277,8 @@ export const MessageBlock = memo(({
           <box
             style={{
               flexDirection: 'column',
-              gap: 0,
+              gap: 1,
               width: '100%',
-              paddingTop: 0,
             }}
           >
             <BlocksRenderer
@@ -281,7 +293,7 @@ export const MessageBlock = memo(({
               onToggleCollapsed={onToggleCollapsed}
               onBuildFast={onBuildFast}
               onBuildMax={onBuildMax}
-              onBuildFree={onBuildFree}
+              onBuildLite={onBuildLite}
               isLastMessage={isLastMessage}
               contentToCopy={isUser ? content : undefined}
             />
@@ -302,10 +314,12 @@ export const MessageBlock = memo(({
         {/* Show attachments for user messages */}
         {isUser &&
           ((attachments && attachments.length > 0) ||
-            (textAttachments && textAttachments.length > 0)) && (
+            (textAttachments && textAttachments.length > 0) ||
+            (fileAttachments && fileAttachments.length > 0)) && (
             <MessageAttachments
               imageAttachments={attachments ?? []}
               textAttachments={textAttachments ?? []}
+              fileAttachments={fileAttachments ?? []}
             />
           )}
       </box>

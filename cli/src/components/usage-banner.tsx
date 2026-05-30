@@ -1,13 +1,14 @@
-import { isClaudeOAuthValid } from '@codebuff/sdk'
+import { CHATGPT_OAUTH_ENABLED } from '@codebuff/common/constants/chatgpt-oauth'
+import { IS_FREEBUFF } from '../utils/constants'
+import { isChatGptOAuthValid } from '@codebuff/sdk'
 import { TextAttributes } from '@opentui/core'
-import open from 'open'
+import { safeOpen } from '../utils/open-url'
 import React, { useEffect, useMemo } from 'react'
 
 import { BottomBanner } from './bottom-banner'
 import { Button } from './button'
 import { ProgressBar } from './progress-bar'
 import { getActivityQueryData } from '../hooks/use-activity-query'
-import { useClaudeQuotaQuery } from '../hooks/use-claude-quota-query'
 import { useSubscriptionQuery } from '../hooks/use-subscription-query'
 import { useTheme } from '../hooks/use-theme'
 import { useUpdatePreference } from '../hooks/use-update-preference'
@@ -44,17 +45,13 @@ const formatRenewalDate = (dateStr: string | null): string => {
 }
 
 export const UsageBanner = ({ showTime }: { showTime: number }) => {
+  if (IS_FREEBUFF) return null
+
   const sessionCreditsUsed = useChatStore((state) => state.sessionCreditsUsed)
   const setInputMode = useChatStore((state) => state.setInputMode)
 
-  // Check if Claude OAuth is connected
-  const isClaudeConnected = isClaudeOAuthValid()
-
-  // Fetch Claude quota data if connected
-  const { data: claudeQuota, isLoading: isClaudeLoading } = useClaudeQuotaQuery({
-    enabled: isClaudeConnected,
-    refetchInterval: 30 * 1000, // Refresh every 30 seconds when banner is open
-  })
+  // Check if ChatGPT OAuth is connected
+  const isChatGptConnected = CHATGPT_OAUTH_ENABLED && isChatGptOAuthValid()
 
   // Fetch subscription data
   const { data: subscriptionData, isLoading: isSubscriptionLoading } = useSubscriptionQuery({
@@ -104,7 +101,6 @@ export const UsageBanner = ({ showTime }: { showTime: number }) => {
   }
 
   const colorLevel = getBannerColorLevel(activeData.remainingBalance)
-  const adCredits = activeData.balanceBreakdown?.ad
   const renewalDate = activeData.next_quota_reset ? formatRenewalDate(activeData.next_quota_reset) : null
 
   const activeSubscription = subscriptionData?.hasSubscription ? subscriptionData : null
@@ -129,7 +125,7 @@ export const UsageBanner = ({ showTime }: { showTime: number }) => {
         {/* Codebuff credits section - structured layout */}
         <Button
           onClick={() => {
-            open(WEBSITE_URL + '/usage')
+            safeOpen(WEBSITE_URL + '/usage')
           }}
         >
           <box style={{ flexDirection: 'column', gap: 0 }}>
@@ -146,12 +142,10 @@ export const UsageBanner = ({ showTime }: { showTime: number }) => {
                   {activeData.remainingBalance?.toLocaleString() ?? '?'} credits
                 </text>
               )}
-              {adCredits != null && adCredits > 0 && (
-                <text style={{ fg: theme.muted }}>{`(${adCredits} from ads)`}</text>
-              )}
+
               {!activeSubscription && renewalDate && (
                 <>
-                  <text style={{ fg: theme.muted }}>· Renews:</text>
+                  <text style={{ fg: theme.muted }}>· Cycle:</text>
                   <text style={{ fg: theme.foreground }}>{renewalDate}</text>
                 </>
               )}
@@ -161,37 +155,12 @@ export const UsageBanner = ({ showTime }: { showTime: number }) => {
           </box>
         </Button>
 
-        {/* Claude subscription section - only show if connected */}
-        {isClaudeConnected && (
+        {isChatGptConnected && (
           <box style={{ flexDirection: 'column', marginTop: 1 }}>
-            <text style={{ fg: theme.muted }}>Claude subscription</text>
-            {isClaudeLoading ? (
-              <text style={{ fg: theme.muted }}>Loading quota...</text>
-            ) : claudeQuota ? (
-              <box style={{ flexDirection: 'column', gap: 0 }}>
-                <box style={{ flexDirection: 'row', alignItems: 'center', gap: 1 }}>
-                  <text style={{ fg: theme.muted }}>5-hour:</text>
-                  <ProgressBar value={claudeQuota.fiveHourRemaining} width={15} />
-                  {claudeQuota.fiveHourResetsAt && (
-                    <text style={{ fg: theme.muted }}>
-                      (resets in {formatResetTime(claudeQuota.fiveHourResetsAt)})
-                    </text>
-                  )}
-                </box>
-                {/* Only show 7-day bar if the user has a 7-day limit */}
-                {claudeQuota.sevenDayResetsAt && (
-                  <box style={{ flexDirection: 'row', alignItems: 'center', gap: 1 }}>
-                    <text style={{ fg: theme.muted }}>7-day: </text>
-                    <ProgressBar value={claudeQuota.sevenDayRemaining} width={15} />
-                    <text style={{ fg: theme.muted }}>
-                      (resets in {formatResetTime(claudeQuota.sevenDayResetsAt)})
-                    </text>
-                  </box>
-                )}
-              </box>
-            ) : (
-              <text style={{ fg: theme.muted }}>Unable to fetch quota</text>
-            )}
+            <text style={{ fg: theme.muted }}>ChatGPT subscription</text>
+            <text style={{ fg: theme.muted }}>
+              Connected for supported OpenAI streaming models
+            </text>
           </box>
         )}
       </box>

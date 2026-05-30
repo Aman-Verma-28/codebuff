@@ -1,11 +1,23 @@
 import { getErrorObject } from '@codebuff/common/util/error'
 
+import {
+  markFreebuffSessionCountryBlocked,
+  markFreebuffSessionEnded,
+  markFreebuffSessionSuperseded,
+  refreshFreebuffSession,
+} from '../use-freebuff-session'
 import { getProjectRoot } from '../../project-files'
 import { useChatStore } from '../../state/chat-store'
+import { IS_FREEBUFF } from '../../utils/constants'
 import { processBashContext } from '../../utils/bash-context-processor'
 import { markRunningAgentsAsCancelled } from '../../utils/block-operations'
 import {
+  getCountryBlockFromFreeModeError,
+  getFreeModeUnavailableErrorMessage,
+  getFreebuffGateErrorKind,
+  getFreebuffRateLimitErrorMessage,
   isOutOfCreditsError,
+  isFreeModeUnavailableError,
   OUT_OF_CREDITS_MESSAGE,
 } from '../../utils/error-handling'
 import { formatElapsedTime } from '../../utils/format-elapsed-time'
@@ -24,6 +36,7 @@ import { usageQueryKeys } from '../use-usage-query'
 
 import type {
   PendingAttachment,
+  PendingFileAttachment,
   PendingImageAttachment,
   PendingTextAttachment,
 } from '../../types/store'
@@ -43,7 +56,9 @@ export type ResetEarlyReturnStateParams = {
   isQueuePausedRef?: MutableRefObject<boolean>
 }
 
-export const resetEarlyReturnState = (params: ResetEarlyReturnStateParams): void => {
+export const resetEarlyReturnState = (
+  params: ResetEarlyReturnStateParams,
+): void => {
   const {
     setCanProcessQueue,
     updateChainInProgress,
@@ -142,6 +157,10 @@ export const prepareUserMessage = async (params: {
     (a): a is PendingTextAttachment => a.kind === 'text',
   )
 
+  const pendingFileAttachments = allAttachments.filter(
+    (a): a is PendingFileAttachment => a.kind === 'file',
+  )
+
   // Append text attachments to the content
   let finalContent = content
   if (pendingTextAttachments.length > 0) {
@@ -153,11 +172,29 @@ export const prepareUserMessage = async (params: {
       : textAttachmentContent
   }
 
-  const { attachments: imageAttachments, messageContent } = await processImagesForMessage({
-    content: finalContent,
-    pendingImages,
-    projectRoot: getProjectRoot(),
-  })
+  // Append file/folder attachments to the content
+  if (pendingFileAttachments.length > 0) {
+    const fileAttachmentContent = pendingFileAttachments
+      .filter((att) => att.status === 'ready')
+      .map((att) =>
+        att.isDirectory
+          ? `[Directory: ${att.path}]\n${att.content}`
+          : `[File: ${att.path}]\n${att.content}`,
+      )
+      .join('\n\n')
+    if (fileAttachmentContent) {
+      finalContent = finalContent
+        ? `${finalContent}\n\n${fileAttachmentContent}`
+        : fileAttachmentContent
+    }
+  }
+
+  const { attachments: imageAttachments, messageContent } =
+    await processImagesForMessage({
+      content: finalContent,
+      pendingImages,
+      projectRoot: getProjectRoot(),
+    })
 
   const shouldInsertDivider =
     lastMessageMode === null || lastMessageMode !== agentMode
@@ -170,8 +207,23 @@ export const prepareUserMessage = async (params: {
     charCount: att.charCount,
   }))
 
+  // Convert pending file attachments to stored file attachments for display
+  const fileAttachmentsForMessage = pendingFileAttachments
+    .filter((att) => att.status === 'ready')
+    .map((att) => ({
+      path: att.path,
+      filename: att.filename,
+      isDirectory: att.isDirectory,
+      note: att.note,
+    }))
+
   // Pass original content (not finalContent) for display, but finalContent goes to agent
-  const userMessage = getUserMessage(content, imageAttachments, textAttachmentsForMessage)
+  const userMessage = getUserMessage(
+    content,
+    imageAttachments,
+    textAttachmentsForMessage,
+    fileAttachmentsForMessage,
+  )
   const userMessageId = userMessage.id
   if (imageAttachments.length > 0) {
     userMessage.attachments = imageAttachments
@@ -243,20 +295,29 @@ export const setupStreamingContext = (params: {
   abortControllerRef.current = abortController
 
   abortController.signal.addEventListener('abort', () => {
-    // Abort means the user stopped streaming; finalize with an interruption notice.
+    // Abort means the user stopped streaming; update UI with an interruption notice.
+    // Release the chain lock immediately so new messages can be sent directly instead
+    // of being queued. The minor trade-off is that if the user sends a new message
+    // before client.run() resolves, it may use stale previousRunStateRef. This is
+    // acceptable because: (1) the user explicitly cancelled, and (2) client.run()
+    // will update previousRunStateRef when it eventually resolves, so subsequent
+    // runs will have the full state.
     streamRefs.setters.setWasAbortedByUser(true)
-    finalizeQueueState({
-      setStreamStatus,
-      setCanProcessQueue,
-      updateChainInProgress,
-      isProcessingQueueRef,
-      isQueuePausedRef,
-    })
     setIsRetrying(false)
     timerController.stop('aborted')
 
+    // Update stream status so the UI reflects cancellation visually
+    setStreamStatus('idle')
+
     // Clear streaming agents so cancelled status displays correctly in UI
     setStreamingAgents(() => new Set())
+
+    // Release chain lock and queue state so new messages are sent directly
+    updateChainInProgress(false)
+    setCanProcessQueue(!isQueuePausedRef?.current)
+    if (isProcessingQueueRef) {
+      isProcessingQueueRef.current = false
+    }
 
     updater.updateAiMessageBlocks((blocks) => {
       const cancelledBlocks = markRunningAgentsAsCancelled(blocks)
@@ -275,7 +336,7 @@ export const handleRunCompletion = (params: {
   timerController: SendMessageTimerController
   updater: BatchedMessageUpdater
   aiMessageId: string
-  streamRefs: StreamController
+  wasAbortedByUser: boolean
   setStreamStatus: (status: StreamStatus) => void
   setCanProcessQueue: (can: boolean) => void
   updateChainInProgress: (value: boolean) => void
@@ -290,7 +351,7 @@ export const handleRunCompletion = (params: {
     agentMode,
     timerController,
     updater,
-    streamRefs,
+    wasAbortedByUser,
     setStreamStatus,
     setCanProcessQueue,
     updateChainInProgress,
@@ -300,9 +361,11 @@ export const handleRunCompletion = (params: {
     isQueuePausedRef,
   } = params
 
-  // If user aborted, the abort handler already handled UI updates (interruption notice, etc.)
-  // Don't process the server response as it would interfere with the abort handler's work.
-  if (streamRefs.state.wasAbortedByUser) {
+  // If user aborted, the abort handler already handled UI updates and released the
+  // chain lock. Don't finalize queue state again to avoid interfering with any new
+  // run that may have started after the abort. Uses per-run abort signal (not shared
+  // streamRefs) so a newer run's reset() can't clear this flag.
+  if (wasAbortedByUser) {
     return
   }
 
@@ -319,7 +382,7 @@ export const handleRunCompletion = (params: {
   }
 
   if (!output) {
-    if (!streamRefs.state.wasAbortedByUser) {
+    if (!wasAbortedByUser) {
       updater.setError(DEFAULT_RUN_OUTPUT_ERROR_MESSAGE)
       finalizeAfterError()
     }
@@ -327,11 +390,39 @@ export const handleRunCompletion = (params: {
   }
 
   if (output.type === 'error') {
-
     if (isOutOfCreditsError(output)) {
       updater.setError(OUT_OF_CREDITS_MESSAGE)
       useChatStore.getState().setInputMode('outOfCredits')
       invalidateActivityQuery(usageQueryKeys.current())
+      finalizeAfterError()
+      return
+    }
+
+    if (isFreeModeUnavailableError(output)) {
+      updater.setError(getFreeModeUnavailableErrorMessage(output))
+      if (IS_FREEBUFF) {
+        markFreebuffSessionCountryBlocked(
+          getCountryBlockFromFreeModeError(output) ?? {
+            countryCode: 'UNKNOWN',
+          },
+        )
+      }
+      finalizeAfterError()
+      return
+    }
+
+    const gateKind = getFreebuffGateErrorKind(output)
+    if (gateKind) {
+      handleFreebuffGateError(gateKind, updater)
+      finalizeAfterError()
+      return
+    }
+
+    const freebuffRateLimitMessage = IS_FREEBUFF
+      ? getFreebuffRateLimitErrorMessage(output)
+      : null
+    if (freebuffRateLimitMessage) {
+      updater.setError(freebuffRateLimitMessage)
       finalizeAfterError()
       return
     }
@@ -418,7 +509,79 @@ export const handleRunError = (params: {
     return
   }
 
+  if (isFreeModeUnavailableError(error)) {
+    updater.setError(getFreeModeUnavailableErrorMessage(error))
+    if (IS_FREEBUFF) {
+      markFreebuffSessionCountryBlocked(
+        getCountryBlockFromFreeModeError(error) ?? {
+          countryCode: 'UNKNOWN',
+        },
+      )
+    }
+    return
+  }
+
+  const gateKind = getFreebuffGateErrorKind(error)
+  if (gateKind) {
+    handleFreebuffGateError(gateKind, updater)
+    return
+  }
+
+  const freebuffRateLimitMessage = IS_FREEBUFF
+    ? getFreebuffRateLimitErrorMessage(error)
+    : null
+  if (freebuffRateLimitMessage) {
+    updater.setError(freebuffRateLimitMessage)
+    return
+  }
+
   // Use setError for all errors so they display in UserErrorBanner consistently
   const errorMessage = errorInfo.message || 'An unexpected error occurred'
   updater.setError(errorMessage)
+}
+
+/**
+ * Surface + recover from a waiting-room gate rejection. The server rejected
+ * the request because our seat is no longer valid; update local state so the
+ * UI reflects reality and we stop sending requests until we re-admit.
+ */
+function handleFreebuffGateError(
+  kind: ReturnType<typeof getFreebuffGateErrorKind>,
+  updater: BatchedMessageUpdater,
+) {
+  switch (kind) {
+    case 'session_expired':
+    case 'waiting_room_required':
+    case 'session_model_mismatch':
+      // Our seat is gone mid-chat. Finalize the AI message so its streaming
+      // indicator stops — otherwise `isComplete` stays false and the message
+      // keeps rendering a blinking cursor forever, making the user think the
+      // agent is still working even though the SessionEndedBanner is visible
+      // and actionable. Also disposes the batched-updater flush interval.
+      updater.markComplete()
+      // Flip to `ended` instead of auto re-queuing: the Chat surface stays
+      // mounted so any in-flight agent work can finish under the server-side
+      // grace period, and the session-ended banner prompts the user to press
+      // Enter when they're ready to rejoin.
+      markFreebuffSessionEnded()
+      return
+    case 'waiting_room_queued':
+      updater.setError(
+        "You're still in the waiting room. Please wait for admission before sending messages.",
+      )
+      // Re-sync without resetting chat — this is a "we'll wait", not a
+      // "let's start fresh".
+      refreshFreebuffSession().catch(() => {})
+      return
+    case 'session_superseded':
+      updater.setError(
+        'Another freebuff CLI took over this account. Close the other instance, then restart.',
+      )
+      // Terminal state: stop polling and flip UI to a "please restart" screen
+      // so we don't silently fight the other instance for the seat.
+      markFreebuffSessionSuperseded()
+      return
+    default:
+      return
+  }
 }

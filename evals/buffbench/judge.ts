@@ -123,17 +123,17 @@ Provide detailed analysis, strengths, weaknesses, and numerical scores.`,
 const judgeAgents: Record<string, AgentDefinition> = {
   'judge-gpt': {
     id: 'judge-gpt',
-    model: 'openai/gpt-5.1',
+    model: 'openai/gpt-5.4',
     ...judgeAgentBase,
   },
   'judge-gemini': {
     id: 'judge-gemini',
-    model: 'google/gemini-3-pro-preview',
+    model: 'google/gemini-3.1-pro-preview',
     ...judgeAgentBase,
   },
   'judge-sonnet': {
     id: 'judge-claude',
-    model: 'anthropic/claude-sonnet-4.5',
+    model: 'anthropic/claude-sonnet-4.6',
     ...judgeAgentBase,
   },
 }

@@ -25,6 +25,7 @@ const MOCK_USER = {
   referral_code: null,
   stripe_customer_id: null,
   banned: false,
+  created_at: new Date('2024-01-01T00:00:00Z'),
 } as const
 
 function buildMockAgentTemplate(params: {
@@ -55,7 +56,12 @@ function buildMockAgentTemplate(params: {
   }
 }
 
-const MOCK_TOOL_NAMES = ['get_weather', 'execute_sql', 'fetch_api'] as const
+const MOCK_TOOL_NAMES = [
+  'get_weather',
+  'execute_sql',
+  'fetch_api',
+  'apply_patch',
+] as const
 type MockToolName = (typeof MOCK_TOOL_NAMES)[number]
 
 function getMessageText(message: Message): string {
@@ -91,7 +97,9 @@ function getAllText(messages: Message[]): string {
 }
 
 function extractLatestUserMessage(text: string): string | null {
-  const matches = [...text.matchAll(/<user_message>([\s\S]*?)<\/user_message>/g)]
+  const matches = [
+    ...text.matchAll(/<user_message>([\s\S]*?)<\/user_message>/g),
+  ]
   if (matches.length === 0) {
     return null
   }
@@ -108,13 +116,7 @@ function splitTextIntoChunks(text: string): string[] {
   }
 
   const targetChunks =
-    text.length <= 1
-      ? 1
-      : text.length > 120
-        ? 4
-        : text.length > 60
-          ? 3
-          : 2
+    text.length <= 1 ? 1 : text.length > 120 ? 4 : text.length > 60 ? 3 : 2
   if (targetChunks === 1) {
     return [text]
   }
@@ -140,7 +142,14 @@ function extractQuotedText(text: string): string | null {
 }
 
 function extractCity(text: string): string | null {
-  const knownCities = ['New York', 'Atlantis', 'London', 'Tokyo', 'Sydney', 'Paris']
+  const knownCities = [
+    'New York',
+    'Atlantis',
+    'London',
+    'Tokyo',
+    'Sydney',
+    'Paris',
+  ]
   for (const city of knownCities) {
     if (text.toLowerCase().includes(city.toLowerCase())) {
       return city
@@ -187,6 +196,22 @@ function buildMockToolCall(params: {
       ? 'SELECT * FROM users WHERE id = 1'
       : 'SELECT * FROM users'
     return { toolName: 'execute_sql', input: { query } }
+  }
+
+  if (
+    availableTools.has('apply_patch') &&
+    (lowerPrompt.includes('apply patch') || lowerPrompt.includes('patch file'))
+  ) {
+    return {
+      toolName: 'apply_patch',
+      input: {
+        operation: {
+          type: 'create_file' as const,
+          path: 'hello-from-apply-patch.txt',
+          diff: '@@\n+hello from apply_patch\n',
+        },
+      },
+    }
   }
 
   if (
@@ -270,6 +295,14 @@ function buildMockResponseText(params: {
   }
 
   if (
+    lowerPrompt.includes('apply patch') ||
+    lowerPrompt.includes('patch file') ||
+    toolName === 'apply_patch'
+  ) {
+    return 'Applied patch successfully.'
+  }
+
+  if (
     lowerPrompt.includes('fetch') ||
     lowerPrompt.includes('http') ||
     toolName === 'fetch_api'
@@ -309,7 +342,9 @@ async function* promptAiSdkStreamMock(
   const latestUserText = getLatestUserText(params.messages)
   const allText = getAllText(params.messages)
   const promptText = getPromptText(latestUserText, allText)
-  const hasToolResult = params.messages.some((message) => message.role === 'tool')
+  const hasToolResult = params.messages.some(
+    (message) => message.role === 'tool',
+  )
 
   const toolCall = buildMockToolCall({
     tools: params.tools as Record<string, unknown> | undefined,
@@ -344,7 +379,9 @@ async function* promptAiSdkStreamMock(
     await params.onCostCalculated(0)
   }
 
-  return `mock-message-${Math.random().toString(36).slice(2, 10)}`
+  return promptSuccess(
+    `mock-message-${Math.random().toString(36).slice(2, 10)}`,
+  )
 }
 
 async function promptAiSdkMock(
@@ -393,7 +430,9 @@ export function setupE2eMocks(): void {
     async ({ fields }) =>
       Object.fromEntries(
         fields.map((field) => [field, MOCK_USER[field]]),
-      ) as Awaited<ReturnType<typeof databaseModule.getUserInfoFromApiKey>>,
+      ) as unknown as Awaited<
+        ReturnType<typeof databaseModule.getUserInfoFromApiKey>
+      >,
   )
   spyOn(databaseModule, 'fetchAgentFromDatabase').mockImplementation(
     async ({ parsedAgentId }) => buildMockAgentTemplate(parsedAgentId),
@@ -406,7 +445,9 @@ export function setupE2eMocks(): void {
     async () => `mock-step-${Math.random().toString(36).slice(2, 10)}`,
   )
 
-  spyOn(llmModule, 'promptAiSdkStream').mockImplementation(promptAiSdkStreamMock)
+  spyOn(llmModule, 'promptAiSdkStream').mockImplementation(
+    promptAiSdkStreamMock,
+  )
   spyOn(llmModule, 'promptAiSdk').mockImplementation(promptAiSdkMock)
   spyOn(llmModule, 'promptAiSdkStructured').mockImplementation(
     promptAiSdkStructuredMock as typeof llmModule.promptAiSdkStructured,

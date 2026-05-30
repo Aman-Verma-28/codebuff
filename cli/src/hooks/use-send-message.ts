@@ -3,10 +3,12 @@ import { useCallback, useEffect, useRef } from 'react'
 import { setCurrentChatId } from '../project-files'
 import { createStreamController } from './stream-state'
 import { useChatStore } from '../state/chat-store'
+import { getFreebuffInstanceId } from './use-freebuff-session'
 import { getCodebuffClient } from '../utils/codebuff-client'
-import { AGENT_MODE_TO_ID, AGENT_MODE_TO_COST_MODE } from '../utils/constants'
+import { AGENT_MODE_TO_COST_MODE, IS_FREEBUFF } from '../utils/constants'
 import { createEventHandlerState } from '../utils/create-event-handler-state'
 import { createRunConfig } from '../utils/create-run-config'
+import { getAgentIdForMode } from '../utils/freebuff-agent-selection'
 import { loadAgentDefinitions } from '../utils/local-agent-registry'
 import { logger } from '../utils/logger'
 import {
@@ -76,7 +78,7 @@ const resolveAgent = (
       ? agentDefinitions.find((definition) => definition.id === agentId)
       : undefined
 
-  return selectedAgentDefinition ?? agentId ?? AGENT_MODE_TO_ID[agentMode]
+  return selectedAgentDefinition ?? agentId ?? getAgentIdForMode(agentMode)
 }
 
 // Respect bash context, but avoid sending empty prompts when only images are attached.
@@ -107,7 +109,7 @@ export const useSendMessage = ({
   onBeforeMessageSend,
   mainAgentTimer,
   scrollToLatest,
-  onTimerEvent = () => { },
+  onTimerEvent = () => {},
   isQueuePausedRef,
   isProcessingQueueRef,
   resumeQueue,
@@ -133,7 +135,9 @@ export const useSendMessage = ({
     setRunState,
     setIsRetrying,
   } = useChatStore.getState()
-  const previousRunStateRef = useRef<RunState | null>(null)
+  const previousRunStateRef = useRef<RunState | null>(
+    useChatStore.getState().runState,
+  )
   // Memoize stream controller to maintain referential stability across renders
   const streamRefsRef = useRef<ReturnType<
     typeof createStreamController
@@ -193,6 +197,7 @@ export const useSendMessage = ({
 
   function clearMessages() {
     previousRunStateRef.current = null
+    setRunState(null)
   }
 
   const prepareUserMessage = useCallback(
@@ -294,13 +299,13 @@ export const useSendMessage = ({
           const errorsToAttach =
             validationResult.errors.length === 0
               ? [
-                // Hide this for now, as validate endpoint may be flaky and we don't want to bother users.
-                // {
-                //   id: NETWORK_ERROR_ID,
-                //   message:
-                //     'Agent validation failed. This may be due to a network issue or temporary server problem. Please try again.',
-                // },
-              ]
+                  // Hide this for now, as validate endpoint may be flaky and we don't want to bother users.
+                  // {
+                  //   id: NETWORK_ERROR_ID,
+                  //   message:
+                  //     'Agent validation failed. This may be due to a network issue or temporary server problem. Please try again.',
+                  // },
+                ]
               : validationResult.errors
 
           setMessages((prev) =>
@@ -360,10 +365,11 @@ export const useSendMessage = ({
           '[send-message] No Codebuff client available. Please ensure you are authenticated.',
         )
         // Show error to user instead of silently failing
+        const brandName = IS_FREEBUFF ? 'Freebuff' : 'Codebuff'
         setMessages((prev) => [
           ...prev,
           createErrorChatMessage(
-            '⚠️ Unable to connect to Codebuff. Please check your authentication and try again.',
+            `⚠️ Unable to connect to ${brandName}. Please check your authentication and try again.`,
           ),
         ])
         await yieldToEventLoop()
@@ -444,6 +450,7 @@ export const useSendMessage = ({
           },
         })
 
+        const freebuffInstanceId = getFreebuffInstanceId()
         const runConfig = createRunConfig({
           logger,
           agent: resolvedAgent,
@@ -454,9 +461,16 @@ export const useSendMessage = ({
           eventHandlerState,
           signal: abortController.signal,
           costMode: AGENT_MODE_TO_COST_MODE[agentMode],
+          extraCodebuffMetadata:
+            IS_FREEBUFF && freebuffInstanceId
+              ? { freebuff_instance_id: freebuffInstanceId }
+              : undefined,
         })
 
-        logger.info({ runConfig }, '[send-message] Sending message with sdk run config')
+        logger.info(
+          { runConfig },
+          '[send-message] Sending message with sdk run config',
+        )
         const runState = await client.run(runConfig)
 
         // Finalize: persist state and mark complete
@@ -475,7 +489,7 @@ export const useSendMessage = ({
           timerController,
           updater,
           aiMessageId,
-          streamRefs,
+          wasAbortedByUser: abortController.signal.aborted,
           setStreamStatus,
           setCanProcessQueue,
           updateChainInProgress,
@@ -485,31 +499,46 @@ export const useSendMessage = ({
           isQueuePausedRef,
         })
       } catch (error) {
-        handleRunError({
-          error,
-          timerController,
-          updater,
-          setIsRetrying,
-          setStreamStatus,
-          setCanProcessQueue,
-          updateChainInProgress,
-          isProcessingQueueRef,
-          isQueuePausedRef,
-        })
-      } finally {
-        if (isChainInProgressRef.current) {
-          logger.warn(
-            {},
-            '[send-message] Chain still in progress after try/catch, forcing reset',
-          )
-          updateChainInProgress(false)
-          setStreamStatus('idle')
-          setCanProcessQueue(!isQueuePausedRef?.current)
+        // If this run was aborted, the abort handler already handled cleanup.
+        // Don't run error handling to avoid interfering with any new run that
+        // may have started. Uses per-run abortController.signal (not shared
+        // streamRefs) so a newer run's reset() can't clear this flag.
+        if (!abortController.signal.aborted) {
+          handleRunError({
+            error,
+            timerController,
+            updater,
+            setIsRetrying,
+            setStreamStatus,
+            setCanProcessQueue,
+            updateChainInProgress,
+            isProcessingQueueRef,
+            isQueuePausedRef,
+          })
+        } else {
+          logger.debug({ error }, '[send-message] Ignoring error after abort')
         }
-        // Safety net: ensure lock is always released even if handleRunCompletion/handleRunError
-        // didn't run (e.g., due to unexpected early return). Redundant releases are safe (idempotent).
-        if (isProcessingQueueRef) {
-          isProcessingQueueRef.current = false
+      } finally {
+        // If this run was aborted, the abort handler already released the chain lock
+        // and queue processing state. Don't touch shared state here to avoid
+        // interfering with any new run that may have started after the abort.
+        // Uses per-run abortController.signal (not shared streamRefs) so a newer
+        // run's reset() can't clear this flag.
+        if (!abortController.signal.aborted) {
+          if (isChainInProgressRef.current) {
+            logger.warn(
+              {},
+              '[send-message] Chain still in progress after try/catch, forcing reset',
+            )
+            updateChainInProgress(false)
+            setStreamStatus('idle')
+            setCanProcessQueue(!isQueuePausedRef?.current)
+          }
+          // Safety net: ensure lock is always released even if handleRunCompletion/handleRunError
+          // didn't run (e.g., due to unexpected early return). Redundant releases are safe (idempotent).
+          if (isProcessingQueueRef) {
+            isProcessingQueueRef.current = false
+          }
         }
         updater.dispose()
       }

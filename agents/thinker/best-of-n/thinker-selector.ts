@@ -9,8 +9,13 @@ export function createThinkerSelector(
   return {
     publisher,
     model: isOpus
-      ? 'anthropic/claude-opus-4.6'
+      ? 'anthropic/claude-opus-4.7'
       : 'anthropic/claude-sonnet-4.5',
+    ...(isOpus && {
+      providerOptions: {
+        only: ['amazon-bedrock'],
+      },
+    }),
     displayName: isOpus
       ? 'Opus Thinker Output Selector'
       : 'Thinker Output Selector',

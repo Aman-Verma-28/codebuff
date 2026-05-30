@@ -45,7 +45,6 @@ export enum AnalyticsEvent {
 
   // Web - Authentication
   AUTH_LOGIN_STARTED = 'auth.login_started',
-  AUTH_REFERRAL_GITHUB_LOGIN_STARTED = 'auth.referral_github_login_started',
   AUTH_LOGOUT_COMPLETED = 'auth.logout_completed',
 
   // Web - Cookie Consent
@@ -62,6 +61,9 @@ export enum AnalyticsEvent {
   ONBOARD_PAGE_CD_COMMAND_COPIED = 'onboard_page.cd_command_copied',
   ONBOARD_PAGE_RUN_COMMAND_COPIED = 'onboard_page.run_command_copied',
   ONBOARD_PAGE_INSTALL_COMMAND_COPIED = 'onboard_page.install_command_copied',
+
+  // Web - Creator Attribution
+  CODEBUFF_REFERRER_ATTRIBUTED = 'codebuff.referrer_attributed',
 
   // Web - Install Dialog
   INSTALL_DIALOG_CD_COMMAND_COPIED = 'install_dialog.cd_command_copied',
@@ -87,7 +89,6 @@ export enum AnalyticsEvent {
 
   // Web - UI Components
   TOAST_SHOWN = 'toast.shown',
-  REFERRAL_BANNER_CLICKED = 'referral_banner.clicked',
 
   // Web - API
   AGENT_RUN_API_REQUEST = 'api.agent_run_request',
@@ -123,6 +124,11 @@ export enum AnalyticsEvent {
   DOCS_SEARCH_INSUFFICIENT_CREDITS = 'api.docs_search_insufficient_credits',
   DOCS_SEARCH_ERROR = 'api.docs_search_error',
 
+  GRAVITY_INDEX_REQUEST = 'api.gravity_index_request',
+  GRAVITY_INDEX_AUTH_ERROR = 'api.gravity_index_auth_error',
+  GRAVITY_INDEX_VALIDATION_ERROR = 'api.gravity_index_validation_error',
+  GRAVITY_INDEX_ERROR = 'api.gravity_index_error',
+
   // Web - Feedback API
   FEEDBACK_SUBMITTED = 'api.feedback_submitted',
   FEEDBACK_AUTH_ERROR = 'api.feedback_auth_error',
@@ -130,6 +136,7 @@ export enum AnalyticsEvent {
 
   // Web - Ads API
   ADS_API_AUTH_ERROR = 'api.ads_auth_error',
+  ADS_CLICKED = 'ads.clicked',
 
   // Web - Token Count API
   TOKEN_COUNT_REQUEST = 'api.token_count_request',
@@ -137,10 +144,24 @@ export enum AnalyticsEvent {
   TOKEN_COUNT_VALIDATION_ERROR = 'api.token_count_validation_error',
   TOKEN_COUNT_ERROR = 'api.token_count_error',
 
-  // Claude OAuth
-  CLAUDE_OAUTH_REQUEST = 'sdk.claude_oauth_request',
-  CLAUDE_OAUTH_RATE_LIMITED = 'sdk.claude_oauth_rate_limited',
-  CLAUDE_OAUTH_AUTH_ERROR = 'sdk.claude_oauth_auth_error',
+  // ChatGPT OAuth
+  CHATGPT_OAUTH_REQUEST = 'sdk.chatgpt_oauth_request',
+  CHATGPT_OAUTH_RATE_LIMITED = 'sdk.chatgpt_oauth_rate_limited',
+  CHATGPT_OAUTH_AUTH_ERROR = 'sdk.chatgpt_oauth_auth_error',
+
+  // Freebuff - Creator Attribution
+  FREEBUFF_REFERRER_ATTRIBUTED = 'freebuff.referrer_attributed',
+
+  // Freebuff - Get Started Page
+  FREEBUFF_GET_STARTED_VIEWED = 'freebuff.get_started_viewed',
+  FREEBUFF_GET_STARTED_HELP_EXPANDED = 'freebuff.get_started_help_expanded',
+  FREEBUFF_GET_STARTED_EDITOR_CLICKED = 'freebuff.get_started_editor_clicked',
+
+  // Freebuff - Home Page
+  FREEBUFF_HOME_INSTALL_COMMAND_COPIED = 'freebuff.home_install_command_copied',
+  FREEBUFF_HOME_GITHUB_CLICKED = 'freebuff.home_github_clicked',
+  FREEBUFF_HOME_INSTALL_GUIDE_EXPANDED = 'freebuff.home_install_guide_expanded',
+  FREEBUFF_HOME_FAQ_OPENED = 'freebuff.home_faq_opened',
 
   // Common
   FLUSH_FAILED = 'common.flush_failed',

@@ -11,12 +11,10 @@ import {
   spyOn,
 } from 'bun:test'
 
-
 import { getFiles } from '../tools/read-files'
 
 import type { CodebuffFileSystem } from '@codebuff/common/types/filesystem'
 import type { PathLike } from 'node:fs'
-
 
 // Helper to create a mock filesystem
 function createMockFs(config: {
@@ -75,9 +73,10 @@ describe('getFiles', () => {
 
   beforeEach(() => {
     // Default: no files are ignored
-    isFileIgnoredSpy = spyOn(projectFileTree, 'isFileIgnored').mockResolvedValue(
-      false,
-    )
+    isFileIgnoredSpy = spyOn(
+      projectFileTree,
+      'isFileIgnored',
+    ).mockResolvedValue(false)
   })
 
   afterEach(() => {
@@ -186,12 +185,13 @@ describe('getFiles', () => {
   })
 
   describe('file too large', () => {
-    test('should return TOO_LARGE for files over 1MB', async () => {
+    test('should truncate files over 100k chars to first 100k chars with message', async () => {
+      const largeContent = 'x'.repeat(100_001) + 'y'.repeat(1000) // over limit
       const mockFs = createMockFs({
         files: {
           '/project/large.bin': {
-            content: 'x',
-            size: 2 * 1024 * 1024, // 2MB
+            content: largeContent,
+            size: largeContent.length,
           },
         },
       })
@@ -202,28 +202,77 @@ describe('getFiles', () => {
         fs: mockFs,
       })
 
-      expect(result['large.bin']).toContain(FILE_READ_STATUS.TOO_LARGE)
-      expect(result['large.bin']).toContain('2.00MB')
+      // Should contain first 100k chars
+      expect(result['large.bin']).toContain('x'.repeat(100_000))
+      // Should NOT contain content beyond the limit
+      expect(result['large.bin']).not.toContain('y')
+      // Should contain truncation message
+      expect(result['large.bin']).toContain('FILE_TOO_LARGE')
+      expect(result['large.bin']).toContain('101,001 chars')
     })
 
-    test('should read files exactly at 1MB limit', async () => {
-      const oneMBContent = 'x'.repeat(1024 * 1024)
+    test('should read files at exactly 100k chars', async () => {
+      const exactly100kContent = 'x'.repeat(100_000) // exactly 100k chars
       const mockFs = createMockFs({
         files: {
-          '/project/exactly1mb.bin': {
-            content: oneMBContent,
-            size: 1024 * 1024, // exactly 1MB
+          '/project/exactly100k.bin': {
+            content: exactly100kContent,
+            size: exactly100kContent.length,
           },
         },
       })
 
       const result = await getFiles({
-        filePaths: ['exactly1mb.bin'],
+        filePaths: ['exactly100k.bin'],
         cwd: '/project',
         fs: mockFs,
       })
 
-      expect(result['exactly1mb.bin']).toBe(oneMBContent)
+      // Should be read fully (no truncation message)
+      expect(result['exactly100k.bin']).toBe(exactly100kContent)
+      expect(result['exactly100k.bin']).not.toContain('FILE_TOO_LARGE')
+    })
+
+    test('should reject files over 10MB without reading them', async () => {
+      const mockFs = createMockFs({
+        files: {
+          '/project/huge.bin': {
+            content: 'x',
+            size: 15 * 1024 * 1024, // 15MB
+          },
+        },
+      })
+
+      const result = await getFiles({
+        filePaths: ['huge.bin'],
+        cwd: '/project',
+        fs: mockFs,
+      })
+
+      expect(result['huge.bin']).toContain(FILE_READ_STATUS.TOO_LARGE)
+      expect(result['huge.bin']).toContain('15.0MB')
+    })
+
+    test('should read files just under 100k chars', async () => {
+      const justUnder100k = 'x'.repeat(99_000) // under limit
+      const mockFs = createMockFs({
+        files: {
+          '/project/underlimit.bin': {
+            content: justUnder100k,
+            size: justUnder100k.length,
+          },
+        },
+      })
+
+      const result = await getFiles({
+        filePaths: ['underlimit.bin'],
+        cwd: '/project',
+        fs: mockFs,
+      })
+
+      // Should be read fully (no truncation message)
+      expect(result['underlimit.bin']).toBe(justUnder100k)
+      expect(result['underlimit.bin']).not.toContain('FILE_TOO_LARGE')
     })
   })
 
@@ -270,9 +319,7 @@ describe('getFiles', () => {
 
     test('should handle mix of ignored and non-ignored files', async () => {
       // First call returns false (not ignored), second returns true (ignored)
-      isFileIgnoredSpy
-        .mockResolvedValueOnce(false)
-        .mockResolvedValueOnce(true)
+      isFileIgnoredSpy.mockResolvedValueOnce(false).mockResolvedValueOnce(true)
 
       const mockFs = createMockFs({
         files: {
@@ -343,19 +390,10 @@ describe('getFiles', () => {
       const mockFs = createMockFs({
         files: {},
         errors: {
-          '/project/broken.ts': { code: 'EACCES', message: 'Permission denied' },
-        },
-      })
-
-      // Need to also make stat fail with same error
-      const originalStat = mockFs.stat
-      Object.assign(mockFs, {
-        stat: async (filePath: PathLike) => {
-          const pathStr = String(filePath)
-          if (pathStr === '/project/broken.ts') {
-            throw createNodeError('Permission denied', 'EACCES')
-          }
-          return originalStat(pathStr)
+          '/project/broken.ts': {
+            code: 'EACCES',
+            message: 'Permission denied',
+          },
         },
       })
 
@@ -384,6 +422,24 @@ describe('getFiles', () => {
       })
 
       expect(result['src/index.ts']).toBe('content')
+    })
+
+    test('should reject absolute paths in sibling directories with matching prefixes', async () => {
+      const mockFs = createMockFs({
+        files: {
+          '/project-other/src/index.ts': { content: 'outside' },
+        },
+      })
+
+      const result = await getFiles({
+        filePaths: ['/project-other/src/index.ts'],
+        cwd: '/project',
+        fs: mockFs,
+      })
+
+      expect(result['/project-other/src/index.ts']).toBe(
+        FILE_READ_STATUS.OUTSIDE_PROJECT,
+      )
     })
   })
 

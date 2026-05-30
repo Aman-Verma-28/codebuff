@@ -48,6 +48,7 @@ export const mockFileContext: ProjectFileContext = {
     arch: 'test',
     homedir: '/home/test',
     cpus: 1,
+    chromeAvailable: false,
   },
 }
 
@@ -110,9 +111,9 @@ export const TEST_AGENT_RUNTIME_IMPL = Object.freeze({
       id: 'test-user-id',
       email: 'test@example.com',
       discord_id: 'test-discord-id',
-      referral_code: 'ref-test-code',
       stripe_customer_id: null,
       banned: false,
+      created_at: new Date('2024-01-01T00:00:00Z'),
     } as const
     return Object.fromEntries(
       fields.map((field) => [field, user[field as keyof typeof user]]),

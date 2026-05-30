@@ -1,6 +1,6 @@
 import { useEffect, useRef } from 'react'
 
-import { WEBSITE_URL } from '../login/constants'
+import { LOGIN_WEBSITE_URL } from '../login/constants'
 import { pollLoginStatus } from '../login/login-flow'
 import { logger } from '../utils/logger'
 
@@ -8,7 +8,7 @@ import type { User } from '../utils/auth'
 
 interface UseLoginPollingParams {
   loginUrl: string | null
-  fingerprintId: string
+  fingerprintId: string | null
   fingerprintHash: string | null
   expiresAt: string | null
   isWaitingForEnter: boolean
@@ -49,7 +49,10 @@ export function useLoginPolling({
   }, [onError])
 
   useEffect(() => {
-    if (!loginUrl || !fingerprintHash || !expiresAt || !isWaitingForEnter) {
+    // fingerprintHash only becomes non-null after the login-URL mutation
+    // succeeds, and that path always sets fingerprintId first — so gating
+    // on fingerprintHash implicitly gates on fingerprintId.
+    if (!loginUrl || !fingerprintId || !fingerprintHash || !expiresAt || !isWaitingForEnter) {
       return
     }
 
@@ -66,8 +69,8 @@ export function useLoginPolling({
         logger,
       },
       {
-        baseUrl: WEBSITE_URL,
-        fingerprintId,
+        baseUrl: LOGIN_WEBSITE_URL,
+        fingerprintId: fingerprintId!,
         fingerprintHash,
         expiresAt,
         shouldContinue: () => active,

@@ -1,10 +1,14 @@
 import { MAX_AGENT_STEPS_DEFAULT } from '@codebuff/common/constants/agents'
 import { toolNames } from '@codebuff/common/tools/constants'
-import { parseAgentId } from '@codebuff/common/util/agent-id-parsing'
+import {
+  normalizeAgentIdForLookup,
+  parseAgentId,
+} from '@codebuff/common/util/agent-id-parsing'
 import { generateCompactId } from '@codebuff/common/util/string'
 
 import { loopAgentSteps } from '../../../run-agent-step'
 import { getAgentTemplate } from '../../../templates/agent-registry'
+import { formatValueForError } from '../../../util/format-value'
 import {
   filterUnfinishedToolCalls,
   withSystemTags,
@@ -39,6 +43,7 @@ export type SubagentContextParams = AgentRuntimeDeps &
   AgentRuntimeScopedDeps & {
     clientSessionId: string
     costMode?: string
+    extraCodebuffMetadata?: Record<string, string>
     fileContext: ProjectFileContext
     localAgentTemplates: Record<string, AgentTemplate>
     repoId: string | undefined
@@ -92,6 +97,7 @@ export function extractSubagentContextParams(
     // Core context params
     clientSessionId: params.clientSessionId,
     costMode: params.costMode,
+    extraCodebuffMetadata: params.extraCodebuffMetadata,
     fileContext: params.fileContext,
     localAgentTemplates: params.localAgentTemplates,
     repoId: params.repoId,
@@ -112,7 +118,7 @@ export function getMatchingSpawn(
     publisherId: childPublisherId,
     agentId: childAgentId,
     version: childVersion,
-  } = parseAgentId(childFullAgentId)
+  } = parseAgentId(normalizeAgentIdForLookup(childFullAgentId))
 
   if (!childAgentId) {
     return null
@@ -123,7 +129,7 @@ export function getMatchingSpawn(
       publisherId: spawnablePublisherId,
       agentId: spawnableAgentId,
       version: spawnableVersion,
-    } = parseAgentId(spawnableAgent)
+    } = parseAgentId(normalizeAgentIdForLookup(spawnableAgent))
 
     if (!spawnableAgentId) {
       continue
@@ -163,70 +169,6 @@ export function getMatchingSpawn(
 }
 
 /**
- * Synchronously transforms spawn_agents input to use 'commander-lite' instead of 'commander'
- * when the parent agent doesn't have access to 'commander' but does have access to 'commander-lite'.
- * This should be called BEFORE the tool call is streamed to the UI.
- */
-export function transformSpawnAgentsInput(
-  input: Record<string, unknown>,
-  spawnableAgents: AgentTemplateType[],
-): Record<string, unknown> {
-  const agents = input.agents
-  if (!Array.isArray(agents)) {
-    return input
-  }
-
-  let hasTransformation = false
-  const transformedAgents = agents.map((agent) => {
-    if (typeof agent !== 'object' || agent === null) {
-      return agent
-    }
-
-    const agentEntry = agent as Record<string, unknown>
-    const agentTypeStr = agentEntry.agent_type
-    if (typeof agentTypeStr !== 'string') {
-      return agent
-    }
-
-    // Check if this is 'commander'
-    const { agentId } = parseAgentId(agentTypeStr)
-    if (agentId !== 'commander') {
-      return agent
-    }
-
-    // Check if 'commander' is available in spawnableAgents
-    const commanderType = getMatchingSpawn(spawnableAgents, agentTypeStr)
-    if (commanderType) {
-      // Commander is available, no transformation needed
-      return agent
-    }
-
-    // Check if 'commander-lite' is available as a fallback
-    const commanderLiteType = getMatchingSpawn(spawnableAgents, 'commander-lite')
-    if (!commanderLiteType) {
-      // Neither available, let validation handle the error
-      return agent
-    }
-
-    // Transform commander -> commander-lite
-    hasTransformation = true
-    return {
-      ...agentEntry,
-      agent_type: commanderLiteType,
-    }
-  })
-
-  if (!hasTransformation) {
-    return input
-  }
-
-  return {
-    ...input,
-    agents: transformedAgents,
-  }
-}
-
-/**
  * Validates agent template and permissions
  */
 export async function validateAndGetAgentTemplate(
@@ -238,9 +180,26 @@ export async function validateAndGetAgentTemplate(
   } & ParamsExcluding<typeof getAgentTemplate, 'agentId'>,
 ): Promise<{ agentTemplate: AgentTemplate; agentType: string }> {
   const { agentTypeStr, parentAgentTemplate } = params
+  const BASE_AGENTS = ['base', 'base-free', 'base-max', 'base-experimental']
+  const isBaseAgent = BASE_AGENTS.includes(parentAgentTemplate.id)
+  const agentType = isBaseAgent
+    ? normalizeAgentIdForLookup(agentTypeStr)
+    : getMatchingSpawn(parentAgentTemplate.spawnableAgents, agentTypeStr)
+
+  if (!agentType) {
+    if (toolNames.includes(agentTypeStr as any)) {
+      throw new Error(
+        `"${agentTypeStr}" is a tool, not an agent. Call it directly as a tool instead of wrapping it in spawn_agents.`,
+      )
+    }
+    throw new Error(
+      `Agent type ${parentAgentTemplate.id} is not allowed to spawn child agent type ${agentTypeStr}.`,
+    )
+  }
+
   const agentTemplate = await getAgentTemplate({
     ...params,
-    agentId: agentTypeStr,
+    agentId: agentType,
   })
 
   if (!agentTemplate) {
@@ -250,21 +209,6 @@ export async function validateAndGetAgentTemplate(
       )
     }
     throw new Error(`Agent type ${agentTypeStr} not found.`)
-  }
-  const BASE_AGENTS = ['base', 'base-free', 'base-max', 'base-experimental']
-  // Base agent can spawn any agent
-  if (BASE_AGENTS.includes(parentAgentTemplate.id)) {
-    return { agentTemplate, agentType: agentTypeStr }
-  }
-
-  const agentType = getMatchingSpawn(
-    parentAgentTemplate.spawnableAgents,
-    agentTypeStr,
-  )
-  if (!agentType) {
-    throw new Error(
-      `Agent type ${parentAgentTemplate.id} is not allowed to spawn child agent type ${agentTypeStr}.`,
-    )
   }
 
   return { agentTemplate, agentType }
@@ -286,7 +230,7 @@ export function validateAgentInput(
     const result = inputSchema.prompt.safeParse(prompt ?? '')
     if (!result.success) {
       throw new Error(
-        `Invalid prompt for agent ${agentType}: ${JSON.stringify(result.error.issues, null, 2)}`,
+        `Invalid prompt for agent ${agentType}: ${JSON.stringify(result.error.issues, null, 2)}\n\nOriginal prompt value:\n${formatValueForError(prompt ?? '')}`,
       )
     }
   }
@@ -296,7 +240,7 @@ export function validateAgentInput(
     const result = inputSchema.params.safeParse(params ?? {})
     if (!result.success) {
       throw new Error(
-        `Invalid params for agent ${agentType}: ${JSON.stringify(result.error.issues, null, 2)}`,
+        `Invalid params for agent ${agentType}: ${JSON.stringify(result.error.issues, null, 2)}\n\nOriginal params value:\n${formatValueForError(params ?? {})}`,
       )
     }
   }

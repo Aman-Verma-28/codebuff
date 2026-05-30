@@ -1,4 +1,5 @@
 import { useChatStore } from '../state/chat-store'
+import { IS_FREEBUFF } from '../utils/constants'
 import { logger } from '../utils/logger'
 import { getSystemMessage } from '../utils/message-history'
 import { saveSettings, loadSettings } from '../utils/settings'
@@ -15,7 +16,7 @@ export const handleAdsEnable = (): {
   return {
     postUserMessage: (messages) => [
       ...messages,
-      getSystemMessage('Ads enabled. You will see contextual ads above the input and earn credits from impressions.'),
+      getSystemMessage('Ads enabled. You will see contextual ads above the input.'),
     ],
   }
 }
@@ -35,15 +36,9 @@ export const handleAdsDisable = (): {
 }
 
 export const getAdsEnabled = (): boolean => {
-  // If no mode provided, get it from the store
-  const mode = useChatStore.getState().agentMode
+  if (IS_FREEBUFF) return true
 
-  // In FREE mode, ads are always enabled regardless of saved setting
-  if (mode === 'FREE') {
-    return true
-  }
-
-  // Otherwise, use the saved setting
+  // Codebuff LITE is a paid mode now, so use the normal saved setting.
   const settings = loadSettings()
   return settings.adsEnabled ?? false
 }

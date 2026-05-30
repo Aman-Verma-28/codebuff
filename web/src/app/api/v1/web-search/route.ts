@@ -1,4 +1,5 @@
 import { consumeCreditsWithFallback } from '@codebuff/billing/credit-delegation'
+import { ensureSubscriberBlockGrant } from '@codebuff/billing/subscription'
 import { getUserUsageData } from '@codebuff/billing/usage-service'
 import { trackEvent } from '@codebuff/common/analytics'
 import { env } from '@codebuff/internal/env'
@@ -20,6 +21,7 @@ export async function POST(req: NextRequest) {
     getUserUsageData,
     consumeCreditsWithFallback,
     fetch,
-    serverEnv: { LINKUP_API_KEY: env.LINKUP_API_KEY },
+    serverEnv: { SERPER_API_KEY: env.SERPER_API_KEY },
+    ensureSubscriberBlockGrant,
   })
 }

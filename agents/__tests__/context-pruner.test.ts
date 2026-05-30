@@ -219,6 +219,7 @@ describe('context-pruner handleSteps', () => {
     messages: Message[],
     contextTokenCount?: number,
     maxContextLength?: number,
+    budgets?: { assistantToolBudget?: number; userBudget?: number },
   ) => {
     mockAgentState.messageHistory = messages
     // If contextTokenCount not provided, estimate from messages
@@ -233,7 +234,10 @@ describe('context-pruner handleSteps', () => {
     const generator = contextPruner.handleSteps!({
       agentState: mockAgentState,
       logger: mockLogger,
-      params: maxContextLength ? { maxContextLength } : {},
+      params: {
+        ...(maxContextLength ? { maxContextLength } : {}),
+        ...budgets,
+      },
     })
     const results: any[] = []
     let result = generator.next()
@@ -288,9 +292,11 @@ describe('context-pruner handleSteps', () => {
     expect(content).toContain('<conversation_summary>')
     expect(content).toContain('</conversation_summary>')
 
-    // Should contain the user and assistant markers
+    // Should use a memory artifact format, not transcript role markers
+    expect(content).toContain('<historical_memory>')
     expect(content).toContain('[USER]')
-    expect(content).toContain('[ASSISTANT]')
+    expect(content).toContain('Progress note:')
+    expect(content).not.toContain('[ASSISTANT]')
   })
 
   test('includes tool call summaries in the output', () => {
@@ -299,7 +305,9 @@ describe('context-pruner handleSteps', () => {
       createToolCallMessage('call-1', 'read_files', {
         paths: ['file1.ts', 'file2.ts'],
       }),
-      createToolResultMessage('call-1', 'read_files', { content: 'file data' } as JSONValue),
+      createToolResultMessage('call-1', 'read_files', {
+        content: 'file data',
+      } as JSONValue),
       createMessage('user', 'Now edit this file'),
       createToolCallMessage('call-2', 'str_replace', {
         path: 'file1.ts',
@@ -312,8 +320,8 @@ describe('context-pruner handleSteps', () => {
     const content = results[0].input.messages[0].content[0].text
 
     // Should contain tool summaries
-    expect(content).toContain('Read files: file1.ts, file2.ts')
-    expect(content).toContain('Edited file: file1.ts')
+    expect(content).toContain('inspected files: file1.ts, file2.ts')
+    expect(content).toContain('edited file: file1.ts')
   })
 
   test('summarizes various tool types correctly', () => {
@@ -341,10 +349,10 @@ describe('context-pruner handleSteps', () => {
     const results = runHandleSteps(messages, 50000, 10000)
     const content = results[0].input.messages[0].content[0].text
 
-    expect(content).toContain('Wrote file: new-file.ts')
-    expect(content).toContain('Ran command: npm test')
-    expect(content).toContain('Code search: "function"')
-    expect(content).toContain('Spawned agents:')
+    expect(content).toContain('wrote file: new-file.ts')
+    expect(content).toContain('ran command: npm test')
+    expect(content).toContain('code search for "function"')
+    expect(content).toContain('delegated agents:')
     expect(content).toContain('- file-picker')
     expect(content).toContain('- commander')
   })
@@ -361,7 +369,7 @@ describe('context-pruner handleSteps', () => {
     const results = runHandleSteps(messages, 50000, 10000)
     const content = results[0].input.messages[0].content[0].text
 
-    expect(content).toContain('[TOOL ERROR: read_files] File not found')
+    expect(content).toContain('Tool error from read_files: File not found')
   })
 
   test('notes when user messages have images', () => {
@@ -378,37 +386,7 @@ describe('context-pruner handleSteps', () => {
     const results = runHandleSteps(messages, 50000, 10000)
     const content = results[0].input.messages[0].content[0].text
 
-    expect(content).toContain('[USER] [with image(s)]')
-  })
-
-  test('truncates summary when it exceeds target size', () => {
-    // Create many messages to generate a large summary
-    const messages: Message[] = []
-    for (let i = 0; i < 100; i++) {
-      messages.push(
-        createMessage(
-          'user',
-          `User message number ${i} with some additional content to make it longer`,
-        ),
-      )
-      messages.push(
-        createMessage(
-          'assistant',
-          `Assistant response number ${i} with detailed explanation`,
-        ),
-      )
-    }
-
-    // Use a very small max context to force truncation
-    const results = runHandleSteps(messages, 500000, 5000)
-    const content = results[0].input.messages[0].content[0].text
-
-    // Should contain truncation notice
-    expect(content).toContain('[CONVERSATION TRUNCATED')
-
-    // Should still have the wrapper tags
-    expect(content).toContain('<conversation_summary>')
-    expect(content).toContain('</conversation_summary>')
+    expect(content).toContain('[USER] [image(s) were attached]')
   })
 
   test('removes only INSTRUCTIONS_PROMPT and SUBAGENT_SPAWN when under context limit', () => {
@@ -516,6 +494,90 @@ describe('context-pruner handleSteps', () => {
     expect(instructionsContent).toBe('Parent agent instructions')
   })
 
+  test('preserves tagged live user prompt as a real message after summary', () => {
+    const liveUserPrompt: Message = {
+      role: 'user',
+      content: [{ type: 'text', text: 'LATEST LIVE REQUEST' }],
+      tags: ['USER_PROMPT'],
+    }
+    const instructionsPrompt: Message = {
+      role: 'user',
+      content: [{ type: 'text', text: 'Parent instructions' }],
+      tags: ['INSTRUCTIONS_PROMPT'],
+    }
+    const prunerParamsPrompt: Message = {
+      role: 'user',
+      content: [{ type: 'text', text: '{"maxContextLength":200000}' }],
+      tags: ['USER_PROMPT'],
+    }
+    const messages: Message[] = [
+      createMessage('user', 'Older request'),
+      createMessage('assistant', 'Older answer'),
+      liveUserPrompt,
+      instructionsPrompt,
+      prunerParamsPrompt,
+    ]
+
+    const results = runHandleSteps(messages, 250000, 200000)
+    const resultMessages = results[0].input.messages
+
+    expect(resultMessages).toHaveLength(2)
+    const summaryContent = (resultMessages[0].content[0] as { text: string })
+      .text
+    expect(summaryContent).toContain('Older request')
+    expect(summaryContent).not.toContain('LATEST LIVE REQUEST')
+    expect(resultMessages[1]).toEqual(
+      expect.objectContaining({
+        role: 'user',
+        tags: ['USER_PROMPT'],
+      }),
+    )
+    expect((resultMessages[1].content[0] as { text: string }).text).toBe(
+      'LATEST LIVE REQUEST',
+    )
+  })
+
+  test('keeps live user prompt in memory and adds continuation prompt when pruning mid-turn', () => {
+    const liveUserPrompt: Message = {
+      role: 'user',
+      content: [{ type: 'text', text: 'PLEASE FIX THE BUG' }],
+      tags: ['USER_PROMPT'],
+    }
+    const prunerParamsPrompt: Message = {
+      role: 'user',
+      content: [{ type: 'text', text: '{"maxContextLength":200000}' }],
+      tags: ['USER_PROMPT'],
+    }
+    const messages: Message[] = [
+      liveUserPrompt,
+      createMessage('assistant', 'I found the likely issue.'),
+      createToolCallMessage('call-1', 'read_files', {
+        paths: ['src/bug.ts'],
+      }),
+      createToolResultMessage('call-1', 'read_files', {
+        content: 'buggy code',
+      }),
+      prunerParamsPrompt,
+    ]
+
+    const results = runHandleSteps(messages, 250000, 200000)
+    const resultMessages = results[0].input.messages
+
+    expect(resultMessages).toHaveLength(2)
+    const summaryContent = (resultMessages[0].content[0] as { text: string })
+      .text
+    expect(summaryContent).toContain('PLEASE FIX THE BUG')
+    expect(summaryContent).toContain('I found the likely issue.')
+    expect(summaryContent).toContain('inspected files: src/bug.ts')
+
+    expect(resultMessages[1].role).toBe('user')
+    expect(resultMessages[1].tags).toBeUndefined()
+    const continuationText = (resultMessages[1].content[0] as { text: string })
+      .text
+    expect(continuationText).toContain('Continue the existing assistant turn')
+    expect(continuationText).toContain('Do not restart completed work')
+  })
+
   test('handles empty message history', () => {
     const messages: Message[] = []
 
@@ -590,7 +652,7 @@ describe('context-pruner handleSteps', () => {
     const results = runHandleSteps(messages, 50000, 10000)
     const content = results[0].input.messages[0].content[0].text
 
-    expect(content).toContain('Spawned agent: file-picker')
+    expect(content).toContain('delegated agent file-picker')
   })
 
   test('handles long terminal commands by truncating', () => {
@@ -609,7 +671,7 @@ describe('context-pruner handleSteps', () => {
 
     // Should truncate to 50 chars + ...
     expect(content).toContain(
-      'Ran command: npm run build -- --config=production --verbose --o...',
+      'ran command: npm run build -- --config=production --verbose --o...',
     )
   })
 
@@ -623,7 +685,7 @@ describe('context-pruner handleSteps', () => {
     const results = runHandleSteps(messages, 50000, 10000)
     const content = results[0].input.messages[0].content[0].text
 
-    expect(content).toContain('Used tool: unknown_tool_name')
+    expect(content).toContain('used tool unknown_tool_name')
   })
 
   test('handles multiple tool calls in single assistant message', () => {
@@ -656,8 +718,8 @@ describe('context-pruner handleSteps', () => {
     const content = results[0].input.messages[0].content[0].text
 
     // Both tool calls should be in the summary
-    expect(content).toContain('Read files: a.ts')
-    expect(content).toContain('Read files: b.ts')
+    expect(content).toContain('inspected files: a.ts')
+    expect(content).toContain('inspected files: b.ts')
   })
 
   test('handles mixed text and tool calls in assistant message', () => {
@@ -685,7 +747,7 @@ describe('context-pruner handleSteps', () => {
 
     // Should have both text and tool summary
     expect(content).toContain('Let me read that file for you')
-    expect(content).toContain('Read files: test.ts')
+    expect(content).toContain('inspected files: test.ts')
   })
 })
 
@@ -700,6 +762,7 @@ describe('context-pruner long message truncation', () => {
     messages: Message[],
     contextTokenCount: number,
     maxContextLength: number,
+    budgets?: { assistantToolBudget?: number; userBudget?: number },
   ) => {
     mockAgentState.messageHistory = messages
     mockAgentState.contextTokenCount = contextTokenCount
@@ -712,7 +775,7 @@ describe('context-pruner long message truncation', () => {
     const generator = contextPruner.handleSteps!({
       agentState: mockAgentState,
       logger: mockLogger,
-      params: { maxContextLength },
+      params: { maxContextLength, ...budgets },
     })
     const results: any[] = []
     let result = generator.next()
@@ -726,8 +789,8 @@ describe('context-pruner long message truncation', () => {
   }
 
   test('truncates very long user messages with 80-20 ratio', () => {
-    // Create a message that exceeds 20k chars
-    const longText = 'A'.repeat(25000)
+    // Create a message that exceeds the user message token limit (~13k tokens = ~39k chars)
+    const longText = 'A'.repeat(45000)
     const messages = [
       createMessage('user', longText),
       createMessage('assistant', 'Got it'),
@@ -828,7 +891,9 @@ describe('context-pruner code_search with flags', () => {
     const results = runHandleSteps(messages)
     const content = results[0].input.messages[0].content[0].text
 
-    expect(content).toContain('Code search: "myFunction" (-g *.ts -i)')
+    expect(content).toContain(
+      'code search for "myFunction" (-g *.ts -i)',
+    )
   })
 })
 
@@ -902,7 +967,7 @@ describe('context-pruner ask_user with questions and answers', () => {
     const results = runHandleSteps(messages)
     const content = results[0].input.messages[0].content[0].text
 
-    expect(content).toContain('[USER ANSWERED] Option B was selected')
+    expect(content).toContain('User answered: Option B was selected')
   })
 
   test('includes multi-select answers', () => {
@@ -921,7 +986,7 @@ describe('context-pruner ask_user with questions and answers', () => {
     const results = runHandleSteps(messages)
     const content = results[0].input.messages[0].content[0].text
 
-    expect(content).toContain('[USER ANSWERED] Caching, Logging, Monitoring')
+    expect(content).toContain('User answered: Caching, Logging, Monitoring')
   })
 
   test('shows when user skipped question', () => {
@@ -938,7 +1003,7 @@ describe('context-pruner ask_user with questions and answers', () => {
     const results = runHandleSteps(messages)
     const content = results[0].input.messages[0].content[0].text
 
-    expect(content).toContain('[USER SKIPPED QUESTION]')
+    expect(content).toContain('User skipped question')
   })
 })
 
@@ -989,7 +1054,7 @@ describe('context-pruner terminal command exit codes', () => {
     const results = runHandleSteps(messages)
     const content = results[0].input.messages[0].content[0].text
 
-    expect(content).toContain('[COMMAND FAILED] Exit code: 1')
+    expect(content).toContain('Command failed with exit code: 1')
   })
 
   test('does not show failure for successful command (exit code 0)', () => {
@@ -1007,7 +1072,7 @@ describe('context-pruner terminal command exit codes', () => {
     const results = runHandleSteps(messages)
     const content = results[0].input.messages[0].content[0].text
 
-    expect(content).not.toContain('[COMMAND FAILED]')
+    expect(content).not.toContain('Command failed with exit code')
   })
 })
 
@@ -1087,26 +1152,6 @@ describe('context-pruner spawn_agents with prompt and params', () => {
     expect(content).toContain('params: {"command":"npm test"}')
   })
 
-  test('includes both prompt and params for spawn_agent_inline', () => {
-    const messages = [
-      createMessage('user', 'Search code'),
-      createToolCallMessage('call-1', 'spawn_agent_inline', {
-        agent_type: 'code-searcher',
-        prompt: 'Find usages of deprecated API',
-        params: { searchQueries: [{ pattern: 'oldFunction' }] },
-      }),
-      createToolResultMessage('call-1', 'spawn_agent_inline', { output: {} }),
-    ]
-
-    const results = runHandleSteps(messages)
-    const content = results[0].input.messages[0].content[0].text
-
-    expect(content).toContain('Spawned agent: code-searcher')
-    expect(content).toContain('prompt: "Find usages of deprecated API"')
-    expect(content).toContain('params:')
-    expect(content).toContain('oldFunction')
-  })
-
   test('truncates very long prompts (over 1000 chars)', () => {
     const longPrompt = 'X'.repeat(1500)
     const messages = [
@@ -1138,6 +1183,7 @@ describe('context-pruner repeated compaction', () => {
     messages: Message[],
     contextTokenCount: number,
     maxContextLength: number,
+    budgets?: { assistantToolBudget?: number; userBudget?: number },
   ) => {
     mockAgentState.messageHistory = messages
     mockAgentState.contextTokenCount = contextTokenCount
@@ -1150,7 +1196,7 @@ describe('context-pruner repeated compaction', () => {
     const generator = contextPruner.handleSteps!({
       agentState: mockAgentState,
       logger: mockLogger,
-      params: { maxContextLength },
+      params: { maxContextLength, ...budgets },
     })
     const results: any[] = []
     let result = generator.next()
@@ -1226,6 +1272,137 @@ First assistant response
     const summaryTagCount = (content.match(/<conversation_summary>/g) || [])
       .length
     expect(summaryTagCount).toBe(1)
+  })
+
+  test('drops old entries each cycle when budgets are tight', () => {
+    const simulateCompaction = (
+      inputMessages: Message[],
+      budgets: { assistantToolBudget: number; userBudget: number },
+    ): Message => {
+      const result = runHandleSteps(inputMessages, 250000, 200000, budgets)
+      return result[0].input.messages[0]
+    }
+
+    const tightBudgets = { assistantToolBudget: 25, userBudget: 25 }
+
+    // === CYCLE 1: 3 pairs of messages, tight budgets drop the oldest ===
+    const cycle1Messages = [
+      createMessage('user', 'Cycle1-Request-A'),
+      createMessage('assistant', 'Cycle1-Response-A'),
+      createMessage('user', 'Cycle1-Request-B'),
+      createMessage('assistant', 'Cycle1-Response-B'),
+      createMessage('user', 'Cycle1-Request-C'),
+      createMessage('assistant', 'Cycle1-Response-C'),
+    ]
+    const summary1 = simulateCompaction(cycle1Messages, tightBudgets)
+    const summary1Text = (summary1.content[0] as { type: 'text'; text: string })
+      .text
+
+    // Most recent entries should survive
+    expect(summary1Text).toContain('Cycle1-Request-C')
+    expect(summary1Text).toContain('Cycle1-Response-C')
+    // Oldest entries should be dropped
+    expect(summary1Text).not.toContain('Cycle1-Request-A')
+    expect(summary1Text).not.toContain('Cycle1-Response-A')
+
+    // === CYCLE 2: Add new messages, compact again ===
+    const cycle2Messages = [
+      summary1,
+      createMessage('user', 'Cycle2-Request-D'),
+      createMessage('assistant', 'Cycle2-Response-D'),
+    ]
+    const summary2 = simulateCompaction(cycle2Messages, tightBudgets)
+    const summary2Text = (summary2.content[0] as { type: 'text'; text: string })
+      .text
+
+    // Newest entries from cycle 2 should survive
+    expect(summary2Text).toContain('Cycle2-Request-D')
+    expect(summary2Text).toContain('Cycle2-Response-D')
+    // Cycle 1's oldest survivors should now be dropped
+    expect(summary2Text).not.toContain('Cycle1-Request-A')
+    expect(summary2Text).not.toContain('Cycle1-Response-A')
+
+    // === CYCLE 3: Add more, compact again ===
+    const cycle3Messages = [
+      summary2,
+      createMessage('user', 'Cycle3-Request-E'),
+      createMessage('assistant', 'Cycle3-Response-E'),
+    ]
+    const summary3 = simulateCompaction(cycle3Messages, tightBudgets)
+    const summary3Text = (summary3.content[0] as { type: 'text'; text: string })
+      .text
+
+    // Newest entries from cycle 3 should survive
+    expect(summary3Text).toContain('Cycle3-Request-E')
+    expect(summary3Text).toContain('Cycle3-Response-E')
+    // Very old entries should definitely be gone
+    expect(summary3Text).not.toContain('Cycle1-Request-A')
+    expect(summary3Text).not.toContain('Cycle1-Response-A')
+
+    // Verify only one conversation_summary tag (no nesting)
+    const summaryTagCount = (
+      summary3Text.match(/<conversation_summary>/g) || []
+    ).length
+    expect(summaryTagCount).toBe(1)
+  })
+
+  test('keeps multi-part tool entries grouped across compaction cycles', () => {
+    const simulateCompaction = (inputMessages: Message[]): Message => {
+      const result = runHandleSteps(inputMessages, 250000, 200000)
+      return result[0].input.messages[0]
+    }
+
+    // Create a tool result that produces multiple entryParts:
+    // both an error AND a non-zero exit code
+    const cycle1Messages: Message[] = [
+      createMessage('user', 'Run tests'),
+      createToolCallMessage('call-1', 'run_terminal_command', {
+        command: 'npm test',
+      }),
+      createToolResultMessage('call-1', 'run_terminal_command', {
+        errorMessage: 'Test suite failed',
+        exitCode: 1,
+      }),
+      createMessage('user', 'Fix the tests'),
+      createMessage('assistant', 'I will fix them'),
+    ]
+
+    // Cycle 1: compact
+    const summary1 = simulateCompaction(cycle1Messages)
+    const summary1Text = (summary1.content[0] as { type: 'text'; text: string })
+      .text
+
+    // Both parts should be present in cycle 1
+    expect(summary1Text).toContain(
+      'Tool error from run_terminal_command: Test suite failed',
+    )
+    expect(summary1Text).toContain('Command failed with exit code: 1')
+
+    // Cycle 2: re-compact — the multi-part entry should stay as one entry
+    const cycle2Messages: Message[] = [
+      summary1,
+      createMessage('user', 'Try again'),
+      createMessage('assistant', 'Running tests again'),
+    ]
+    const summary2 = simulateCompaction(cycle2Messages)
+    const summary2Text = (summary2.content[0] as { type: 'text'; text: string })
+      .text
+
+    // Both parts should still be present together after re-compaction
+    expect(summary2Text).toContain(
+      'Tool error from run_terminal_command: Test suite failed',
+    )
+    expect(summary2Text).toContain('Command failed with exit code: 1')
+
+    // They should be within the same --- delimited chunk (not split apart)
+    const separator = '\n\n---\n\n'
+    const chunks = summary2Text
+      .replace(/<conversation_summary>[\s\S]*?\n\n/, '')
+      .replace(/<\/conversation_summary>[\s\S]*/, '')
+      .split(separator)
+    const errorChunk = chunks.find((c) => c.includes('Tool error from'))
+    expect(errorChunk).toBeDefined()
+    expect(errorChunk).toContain('Command failed with exit code: 1')
   })
 
   test('handles 3+ compaction cycles without nested PREVIOUS SUMMARY markers', () => {
@@ -1375,6 +1552,7 @@ describe('context-pruner threshold behavior', () => {
     messages: Message[],
     contextTokenCount: number,
     maxContextLength: number,
+    budgets?: { assistantToolBudget?: number; userBudget?: number },
   ) => {
     mockAgentState.messageHistory = messages
     mockAgentState.contextTokenCount = contextTokenCount
@@ -1387,7 +1565,7 @@ describe('context-pruner threshold behavior', () => {
     const generator = contextPruner.handleSteps!({
       agentState: mockAgentState,
       logger: mockLogger,
-      params: { maxContextLength },
+      params: { maxContextLength, ...budgets },
     })
     const results: any[] = []
     let result = generator.next()
@@ -1466,7 +1644,7 @@ describe('context-pruner str_replace and write_file tool results', () => {
     return results
   }
 
-  test('includes str_replace diff in summary', () => {
+  test('includes str_replace result in summary', () => {
     const messages = [
       createMessage('user', 'Edit this file'),
       createToolCallMessage('call-1', 'str_replace', {
@@ -1474,19 +1652,23 @@ describe('context-pruner str_replace and write_file tool results', () => {
         replacements: [{ old: 'foo', new: 'bar' }],
       }),
       createToolResultMessage('call-1', 'str_replace', {
-        diff: '--- a/src/utils.ts\n+++ b/src/utils.ts\n@@ -1,1 +1,1 @@\n-foo\n+bar',
+        file: 'src/utils.ts',
+        message: 'Updated file',
+        unifiedDiff:
+          '--- a/src/utils.ts\n+++ b/src/utils.ts\n@@ -1,1 +1,1 @@\n-foo\n+bar',
       }),
     ]
 
     const results = runHandleSteps(messages)
     const content = results[0].input.messages[0].content[0].text
 
-    expect(content).toContain('[EDIT RESULT]')
+    expect(content).toContain('Edit result from str_replace:')
+    expect(content).toContain('unifiedDiff')
     expect(content).toContain('-foo')
     expect(content).toContain('+bar')
   })
 
-  test('includes write_file diff in summary', () => {
+  test('includes write_file result in summary', () => {
     const messages = [
       createMessage('user', 'Create a new file'),
       createToolCallMessage('call-1', 'write_file', {
@@ -1494,18 +1676,21 @@ describe('context-pruner str_replace and write_file tool results', () => {
         content: 'export const hello = "world"',
       }),
       createToolResultMessage('call-1', 'write_file', {
-        diff: '--- /dev/null\n+++ b/src/new-file.ts\n@@ -0,0 +1 @@\n+export const hello = "world"',
+        file: 'src/new-file.ts',
+        message: 'Created file',
+        unifiedDiff:
+          '--- /dev/null\n+++ b/src/new-file.ts\n@@ -0,0 +1 @@\n+export const hello = "world"',
       }),
     ]
 
     const results = runHandleSteps(messages)
     const content = results[0].input.messages[0].content[0].text
 
-    expect(content).toContain('[WRITE RESULT]')
-    expect(content).toContain('+export const hello = "world"')
+    expect(content).toContain('Edit result from write_file:')
+    expect(content).toContain('export const hello')
   })
 
-  test('truncates very long str_replace diffs', () => {
+  test('truncates very long str_replace results', () => {
     const longDiff = 'X'.repeat(3000)
     const messages = [
       createMessage('user', 'Make big changes'),
@@ -1514,20 +1699,65 @@ describe('context-pruner str_replace and write_file tool results', () => {
         replacements: [],
       }),
       createToolResultMessage('call-1', 'str_replace', {
-        diff: longDiff,
+        file: 'src/big-file.ts',
+        message: 'Updated file',
+        unifiedDiff: longDiff,
       }),
     ]
 
     const results = runHandleSteps(messages)
     const content = results[0].input.messages[0].content[0].text
 
-    expect(content).toContain('[EDIT RESULT]')
+    expect(content).toContain('Edit result from str_replace:')
     expect(content).toContain('...')
     // Should not contain the full diff
     expect(content).not.toContain(longDiff)
   })
 
-  test('does not include edit result when no diff is present', () => {
+  test('truncates very large tool entries to 5k token limit', () => {
+    // spawn_agents with multiple non-blacklisted agents producing large outputs
+    // Each agent output is capped at ~3,900 chars, but 5 agents × 3,900 = ~19,500 chars
+    // which exceeds the 5k token (15k char) TOOL_ENTRY_LIMIT
+    const largeAgentResults = Array.from({ length: 5 }, (_, i) => ({
+      agentType: `editor`,
+      value: {
+        type: 'string',
+        value: `AGENT_${i}_START_` + 'X'.repeat(4000) + `_AGENT_${i}_END`,
+      },
+    }))
+
+    const messages: Message[] = [
+      createMessage('user', 'Spawn many agents'),
+      createToolCallMessage('call-1', 'spawn_agents', {
+        agents: [
+          { agent_type: 'editor' },
+          { agent_type: 'editor' },
+          { agent_type: 'editor' },
+          { agent_type: 'editor' },
+          { agent_type: 'editor' },
+        ],
+      }),
+      {
+        role: 'tool',
+        toolCallId: 'call-1',
+        toolName: 'spawn_agents',
+        content: [{ type: 'json', value: largeAgentResults }],
+      } as ToolMessage,
+    ]
+
+    const results = runHandleSteps(messages)
+    const content = results[0].input.messages[0].content[0].text
+
+    // Should contain truncation notice from the TOOL_ENTRY_LIMIT cap
+    expect(content).toContain('[...truncated')
+    // The last agent's start marker should be cut by the overall entry cap
+    // (per-agent truncation only cuts within each agent's output, not across agents)
+    expect(content).not.toContain('AGENT_4_START_')
+    // The first agent's start should survive (80% prefix)
+    expect(content).toContain('AGENT_0_START_')
+  })
+
+  test('includes all result properties even without unifiedDiff', () => {
     const messages = [
       createMessage('user', 'Edit file'),
       createToolCallMessage('call-1', 'str_replace', {
@@ -1535,16 +1765,19 @@ describe('context-pruner str_replace and write_file tool results', () => {
         replacements: [],
       }),
       createToolResultMessage('call-1', 'str_replace', {
-        success: true,
+        file: 'src/file.ts',
+        errorMessage: 'No match found for old string',
       }),
     ]
 
     const results = runHandleSteps(messages)
     const content = results[0].input.messages[0].content[0].text
 
-    // Should have the tool call summary but not the result
-    expect(content).toContain('Edited file: src/file.ts')
-    expect(content).not.toContain('[EDIT RESULT]')
+    // Should have both the tool call summary and the full result
+    expect(content).toContain('edited file: src/file.ts')
+    expect(content).toContain('Edit result from str_replace:')
+    expect(content).toContain('errorMessage')
+    expect(content).toContain('No match found for old string')
   })
 })
 
@@ -1580,11 +1813,11 @@ describe('context-pruner glob and list_directory tools', () => {
     return results
   }
 
-  test('summarizes glob tool with patterns', () => {
+  test('summarizes glob tool with pattern', () => {
     const messages = [
       createMessage('user', 'Find files'),
       createToolCallMessage('call-1', 'glob', {
-        patterns: [{ pattern: '*.ts' }, { pattern: '*.js' }],
+        pattern: '**/*.ts',
       }),
       createToolResultMessage('call-1', 'glob', { files: [] }),
     ]
@@ -1592,14 +1825,14 @@ describe('context-pruner glob and list_directory tools', () => {
     const results = runHandleSteps(messages)
     const content = results[0].input.messages[0].content[0].text
 
-    expect(content).toContain('Glob: *.ts, *.js')
+    expect(content).toContain('glob search for **/*.ts')
   })
 
-  test('summarizes list_directory tool with paths', () => {
+  test('summarizes list_directory tool with path', () => {
     const messages = [
       createMessage('user', 'List directories'),
       createToolCallMessage('call-1', 'list_directory', {
-        directories: [{ path: 'src' }, { path: 'lib' }],
+        path: 'src',
       }),
       createToolResultMessage('call-1', 'list_directory', { entries: [] }),
     ]
@@ -1607,7 +1840,7 @@ describe('context-pruner glob and list_directory tools', () => {
     const results = runHandleSteps(messages)
     const content = results[0].input.messages[0].content[0].text
 
-    expect(content).toContain('Listed dirs: src, lib')
+    expect(content).toContain('listed directory: src')
   })
 
   test('summarizes read_subtree tool with paths', () => {
@@ -1622,6 +1855,638 @@ describe('context-pruner glob and list_directory tools', () => {
     const results = runHandleSteps(messages)
     const content = results[0].input.messages[0].content[0].text
 
-    expect(content).toContain('Read subtree: src/components, src/utils')
+    expect(content).toContain(
+      'inspected subtrees: src/components, src/utils',
+    )
+  })
+})
+
+describe('context-pruner dual-budget behavior', () => {
+  let mockAgentState: AgentState
+
+  beforeEach(() => {
+    mockAgentState = createMockAgentState([], 0)
+  })
+
+  const runHandleSteps = (
+    messages: Message[],
+    contextTokenCount: number,
+    maxContextLength: number,
+    budgets?: { assistantToolBudget?: number; userBudget?: number },
+  ) => {
+    mockAgentState.messageHistory = messages
+    mockAgentState.contextTokenCount = contextTokenCount
+    const mockLogger = {
+      debug: () => {},
+      info: () => {},
+      warn: () => {},
+      error: () => {},
+    }
+    const generator = contextPruner.handleSteps!({
+      agentState: mockAgentState,
+      logger: mockLogger,
+      params: { maxContextLength, ...budgets },
+    })
+    const results: any[] = []
+    let result = generator.next()
+    while (!result.done) {
+      if (typeof result.value === 'object') {
+        results.push(result.value)
+      }
+      result = generator.next()
+    }
+    return results
+  }
+
+  test('includes recent messages in summary and drops older ones', () => {
+    const messages = [
+      createMessage('user', 'Old user message 1'),
+      createMessage('assistant', 'Old assistant response 1'),
+      createMessage('user', 'Old user message 2'),
+      createMessage('assistant', 'Old assistant response 2'),
+      createMessage('user', 'Recent user message'),
+      createMessage('assistant', 'Recent assistant response'),
+    ]
+
+    // Small budgets on summarized sizes: only the most recent entries fit
+    const results = runHandleSteps(messages, 250000, 200000, {
+      assistantToolBudget: 15,
+      userBudget: 15,
+    })
+
+    const resultMessages = results[0].input.messages
+
+    // Should be a single summary message (no verbatim messages)
+    expect(resultMessages).toHaveLength(1)
+
+    const content = (resultMessages[0].content[0] as { text: string }).text
+    expect(content).toContain('<conversation_summary>')
+
+    // Recent messages should be in the summary
+    expect(content).toContain('Recent user message')
+    expect(content).toContain('Recent assistant response')
+
+    // Older messages should be dropped entirely (not in summary)
+    expect(content).not.toContain('Old user message 1')
+    expect(content).not.toContain('Old assistant response 1')
+    expect(content).not.toContain('Old user message 2')
+    expect(content).not.toContain('Old assistant response 2')
+  })
+
+  test('summarizes all messages when they fit within budgets', () => {
+    const messages = [
+      createMessage('user', 'Hello'),
+      createMessage('assistant', 'Hi there!'),
+      createMessage('user', 'How are you?'),
+      createMessage('assistant', 'I am fine!'),
+    ]
+
+    // Large budgets: all messages fit in summary
+    const results = runHandleSteps(messages, 250000, 200000, {
+      assistantToolBudget: 20000,
+      userBudget: 50000,
+    })
+
+    const resultMessages = results[0].input.messages
+
+    // All messages summarized into one
+    expect(resultMessages).toHaveLength(1)
+
+    const content = (resultMessages[0].content[0] as { text: string }).text
+    expect(content).toContain('Hello')
+    expect(content).toContain('Hi there!')
+    expect(content).toContain('How are you?')
+    expect(content).toContain('I am fine!')
+  })
+
+  test('respects user budget separately from assistant+tool budget', () => {
+    const largeUserText = 'U'.repeat(600) // ~200 tokens
+    const messages = [
+      createMessage('user', largeUserText),
+      createMessage('assistant', 'Short response'),
+      createMessage('user', 'Recent short question'),
+      createMessage('assistant', 'Recent short answer'),
+    ]
+
+    // User budget small enough to exclude the large user message
+    // Assistant budget large enough to include all assistant messages
+    const results = runHandleSteps(messages, 250000, 200000, {
+      assistantToolBudget: 5000,
+      userBudget: 100,
+    })
+
+    const resultMessages = results[0].input.messages
+    expect(resultMessages).toHaveLength(1)
+
+    const content = (resultMessages[0].content[0] as { text: string }).text
+    expect(content).toContain('<conversation_summary>')
+    // The large user message should be dropped (not in summary)
+    expect(content).not.toContain(largeUserText)
+    // Recent messages should be in the summary
+    expect(content).toContain('Recent short question')
+    expect(content).toContain('Recent short answer')
+  })
+
+  test('drops tool entries beyond budget at the cutoff boundary', () => {
+    const messages = [
+      createMessage('user', 'Old message'),
+      createToolCallMessage('call-1', 'read_files', { paths: ['old.ts'] }),
+      createToolResultMessage('call-1', 'read_files', { content: 'old file' }),
+      createMessage('user', 'Recent message'),
+      createMessage('assistant', 'Recent response'),
+    ]
+
+    // Budget that excludes the older tool call entry
+    const results = runHandleSteps(messages, 250000, 200000, {
+      assistantToolBudget: 15,
+      userBudget: 15,
+    })
+
+    const resultMessages = results[0].input.messages
+    expect(resultMessages).toHaveLength(1)
+
+    const content = (resultMessages[0].content[0] as { text: string }).text
+
+    // Recent messages should be in the summary
+    expect(content).toContain('Recent message')
+    expect(content).toContain('Recent response')
+
+    // Tool call summary should be dropped (beyond budget)
+    expect(content).not.toContain('old.ts')
+  })
+
+  test('counts tool result summaries against assistant+tool budget', () => {
+    // Use str_replace with a large result — this produces a summarized edit-result entry
+    const largeDiff = 'LARGE_DIFF_CONTENT_' + 'X'.repeat(900)
+    const messages = [
+      createMessage('user', 'Do something'),
+      createToolCallMessage('call-1', 'str_replace', {
+        path: 'big.ts',
+        replacements: [],
+      }),
+      createToolResultMessage('call-1', 'str_replace', {
+        file: 'big.ts',
+        message: 'Updated',
+        unifiedDiff: largeDiff,
+      }),
+      createMessage('user', 'Recent question'),
+      createMessage('assistant', 'Recent answer'),
+    ]
+
+    // Assistant budget too small for the large edit-result summary entry
+    const results = runHandleSteps(messages, 250000, 200000, {
+      assistantToolBudget: 100,
+      userBudget: 5000,
+    })
+
+    const resultMessages = results[0].input.messages
+    expect(resultMessages).toHaveLength(1)
+
+    const content = (resultMessages[0].content[0] as { text: string }).text
+    expect(content).toContain('<conversation_summary>')
+    // Recent messages should be in the summary
+    expect(content).toContain('Recent question')
+    expect(content).toContain('Recent answer')
+    // Large edit result entry should be dropped (exceeds assistant+tool budget)
+    expect(content).not.toContain('LARGE_DIFF_CONTENT_')
+  })
+
+  test('drops older messages and includes recent ones in summary', () => {
+    const messages = [
+      createMessage('user', 'First request about feature A'),
+      createMessage('assistant', 'Working on feature A'),
+      createMessage('user', 'Second request about feature B'),
+      createMessage('assistant', 'Working on feature B'),
+    ]
+
+    // Budget only fits the last pair of summarized entries
+    const results = runHandleSteps(messages, 250000, 200000, {
+      assistantToolBudget: 15,
+      userBudget: 15,
+    })
+
+    const resultMessages = results[0].input.messages
+    expect(resultMessages).toHaveLength(1)
+
+    const content = (resultMessages[0].content[0] as { text: string }).text
+    expect(content).toContain('<conversation_summary>')
+
+    // Recent messages should be in the summary
+    expect(content).toContain('Second request about feature B')
+    expect(content).toContain('Working on feature B')
+
+    // Older messages should be dropped
+    expect(content).not.toContain('First request about feature A')
+    expect(content).not.toContain('Working on feature A')
+  })
+
+  test('excludes STEP_PROMPT tagged messages from budget calculation', () => {
+    const largeStepPrompt = 'S'.repeat(900) // ~300 tokens
+    const messages: Message[] = [
+      createMessage('user', 'User request'),
+      createMessage('assistant', 'Assistant response'),
+      {
+        role: 'user',
+        content: [{ type: 'text', text: largeStepPrompt }],
+        tags: ['STEP_PROMPT'],
+      },
+      createMessage('user', 'Recent question'),
+      createMessage('assistant', 'Recent answer'),
+    ]
+
+    // Budget is small but the STEP_PROMPT should NOT count against it,
+    // so both real user messages and both assistant messages should fit
+    const results = runHandleSteps(messages, 250000, 200000, {
+      assistantToolBudget: 200,
+      userBudget: 200,
+    })
+
+    const resultMessages = results[0].input.messages
+    expect(resultMessages).toHaveLength(1)
+
+    const content = (resultMessages[0].content[0] as { text: string }).text
+    // Both real messages should be in the summary
+    expect(content).toContain('User request')
+    expect(content).toContain('Assistant response')
+    expect(content).toContain('Recent question')
+    expect(content).toContain('Recent answer')
+    // STEP_PROMPT content should NOT be in the summary
+    expect(content).not.toContain(largeStepPrompt)
+  })
+
+  test('excludes SUBAGENT_SPAWN tagged messages from budget calculation', () => {
+    const messages: Message[] = [
+      createMessage('user', 'User request'),
+      createMessage('assistant', 'First response'),
+      {
+        role: 'assistant',
+        content: [{ type: 'text', text: 'A'.repeat(900) }],
+        tags: ['SUBAGENT_SPAWN'],
+      },
+      createMessage('user', 'Follow up'),
+      createMessage('assistant', 'Second response'),
+    ]
+
+    // Budget is small but SUBAGENT_SPAWN should NOT count against it
+    const results = runHandleSteps(messages, 250000, 200000, {
+      assistantToolBudget: 200,
+      userBudget: 200,
+    })
+
+    const resultMessages = results[0].input.messages
+    expect(resultMessages).toHaveLength(1)
+
+    const content = (resultMessages[0].content[0] as { text: string }).text
+    expect(content).toContain('User request')
+    expect(content).toContain('First response')
+    expect(content).toContain('Follow up')
+    expect(content).toContain('Second response')
+  })
+
+  test('charges old summary entries against their correct budgets', () => {
+    // Previous summary with a large [USER] entry that exceeds user budget
+    const largeUserContent = 'X'.repeat(900)
+    const previousSummary: Message = {
+      role: 'user',
+      content: [
+        {
+          type: 'text',
+          text: `<conversation_summary>\nThis is a summary of the conversation so far. The original messages have been condensed to save context space.\n\n[USER]\n${largeUserContent}\n\n---\n\n[ASSISTANT]\nOld assistant response\n</conversation_summary>`,
+        },
+      ],
+    }
+
+    const messages: Message[] = [
+      previousSummary,
+      createMessage('user', 'After summary request'),
+      createMessage('assistant', 'After summary response'),
+    ]
+
+    // User budget is small — the large [USER] entry from the old summary
+    // should be dropped because it exceeds the user budget.
+    // The [ASSISTANT] entry from the old summary charges against assistant budget.
+    const results = runHandleSteps(messages, 250000, 200000, {
+      assistantToolBudget: 5000,
+      userBudget: 50,
+    })
+
+    const resultMessages = results[0].input.messages
+    expect(resultMessages).toHaveLength(1)
+
+    const content = (resultMessages[0].content[0] as { text: string }).text
+    // Recent messages should be in the summary
+    expect(content).toContain('After summary request')
+    expect(content).toContain('After summary response')
+    // The old [ASSISTANT] entry fits the assistant budget and is after the cutoff
+    expect(content).toContain('Old assistant response')
+    // The large old [USER] entry should be dropped (exceeded user budget)
+    expect(content).not.toContain(largeUserContent)
+  })
+
+  test('drops old summary entries individually based on budget walk', () => {
+    // Previous summary with identifiable oldest and middle entries
+    const previousSummary: Message = {
+      role: 'user',
+      content: [
+        {
+          type: 'text',
+          text: `<conversation_summary>\nThis is a summary of the conversation so far. The original messages have been condensed to save context space.\n\n[USER]\nOLDEST_USER_ENTRY\n\n---\n\n[ASSISTANT]\nOLDEST_ASSISTANT_ENTRY\n\n---\n\n[USER]\nMIDDLE_USER_ENTRY\n\n---\n\n[ASSISTANT]\nMIDDLE_ASSISTANT_ENTRY\n</conversation_summary>`,
+        },
+      ],
+    }
+
+    const messages: Message[] = [
+      previousSummary,
+      createMessage('user', 'Recent request'),
+      createMessage('assistant', 'Recent response'),
+    ]
+
+    // Budget large enough for middle + recent entries but not oldest
+    const results = runHandleSteps(messages, 250000, 200000, {
+      assistantToolBudget: 25,
+      userBudget: 25,
+    })
+
+    const resultMessages = results[0].input.messages
+    expect(resultMessages).toHaveLength(1)
+
+    const content = (resultMessages[0].content[0] as { text: string }).text
+    // Middle and recent entries should survive
+    expect(content).toContain('MIDDLE_USER_ENTRY')
+    expect(content).toContain('MIDDLE_ASSISTANT_ENTRY')
+    expect(content).toContain('Recent request')
+    expect(content).toContain('Recent response')
+    // Oldest entries should be dropped
+    expect(content).not.toContain('OLDEST_USER_ENTRY')
+    expect(content).not.toContain('OLDEST_ASSISTANT_ENTRY')
+  })
+
+  test('handles complex scenario with long messages of all types and previous summary', () => {
+    // Previous summary with 4 identifiable entries
+    const previousSummary: Message = {
+      role: 'user',
+      content: [
+        {
+          type: 'text',
+          text: `<conversation_summary>\nThis is a summary of the conversation so far. The original messages have been condensed to save context space.\n\n[USER]\nOLD_USER_REQUEST_1: The user asked about setting up authentication with OAuth2 and JWT tokens for the API.\n\n---\n\n[ASSISTANT]\nOLD_ASSISTANT_RESPONSE_1: Explained OAuth2 flow and implemented JWT token generation.\nTools: Read files: src/auth.ts, src/middleware.ts; Edited file: src/auth.ts\n\n---\n\n[USER]\nOLD_USER_REQUEST_2: Asked for unit tests for the auth module.\n\n---\n\n[ASSISTANT]\nOLD_ASSISTANT_RESPONSE_2: Created comprehensive test suite for authentication.\nTools: Wrote file: src/__tests__/auth.test.ts\n</conversation_summary>`,
+        },
+      ],
+    }
+
+    // Long user message (~45k chars, exceeds USER_MESSAGE_LIMIT of 13k tokens = 39k chars)
+    // Middle marker placed ~85% through so it falls in the truncated gap
+    // (past the 80% prefix but before the 20% suffix)
+    const longUserMessage =
+      'LONG_USER_START_' +
+      'Here is a detailed specification for the new feature. '.repeat(650) +
+      '_LONG_USER_MIDDLE_MARKER_' +
+      'Here is a detailed specification for the new feature. '.repeat(150)
+
+    // Long assistant message with text (~8k chars, exceeds ASSISTANT_MESSAGE_LIMIT of 1.3k tokens = 3.9k chars)
+    // plus multiple tool calls. Middle marker placed ~60% through so it falls in the truncated gap.
+    const longAssistantText =
+      'LONG_ASSISTANT_START_' +
+      'I will implement this step by step, starting with the data model changes. '.repeat(
+        60,
+      ) +
+      '_LONG_ASST_MIDDLE_MARKER_' +
+      'I will implement this step by step, starting with the data model changes. '.repeat(
+        40,
+      )
+    const assistantWithToolCalls: Message = {
+      role: 'assistant',
+      content: [
+        { type: 'text', text: longAssistantText },
+        {
+          type: 'tool-call',
+          toolCallId: 'call-1',
+          toolName: 'read_files',
+          input: { paths: ['src/model.ts', 'src/service.ts'] },
+        },
+        {
+          type: 'tool-call',
+          toolCallId: 'call-2',
+          toolName: 'str_replace',
+          input: { path: 'src/model.ts', replacements: [] },
+        },
+        {
+          type: 'tool-call',
+          toolCallId: 'call-3',
+          toolName: 'spawn_agents',
+          input: {
+            agents: [
+              { agent_type: 'editor' },
+              { agent_type: 'editor' },
+              { agent_type: 'editor' },
+              { agent_type: 'editor' },
+              { agent_type: 'editor' },
+            ],
+          },
+        },
+      ],
+    }
+
+    // str_replace result with a large diff (~3k chars, exceeds 2k truncation limit)
+    const largeDiff =
+      'DIFF_START_MARKER_' + '+added line\n'.repeat(250) + '_DIFF_END_MARKER'
+
+    // spawn_agents result with 5 non-blacklisted agents producing large outputs
+    // Each ~4k chars, total ~20k, exceeds TOOL_ENTRY_LIMIT of 5k tokens = 15k chars
+    const largeAgentResults = Array.from({ length: 5 }, (_, i) => ({
+      agentType: 'editor',
+      value: {
+        type: 'string',
+        value:
+          `AGENT_${i}_OUTPUT_START_` +
+          'Implementation details. '.repeat(160) +
+          `_AGENT_${i}_OUTPUT_END`,
+      },
+    }))
+
+    const messages: Message[] = [
+      previousSummary,
+      createMessage('user', longUserMessage),
+      assistantWithToolCalls,
+      createToolResultMessage('call-1', 'read_files', {
+        content: 'file data',
+      } as JSONValue),
+      createToolResultMessage('call-2', 'str_replace', {
+        file: 'src/model.ts',
+        message: 'Updated',
+        unifiedDiff: largeDiff,
+      }),
+      {
+        role: 'tool',
+        toolCallId: 'call-3',
+        toolName: 'spawn_agents',
+        content: [{ type: 'json', value: largeAgentResults }],
+      } as ToolMessage,
+      createMessage('user', 'FINAL_USER_REQUEST: Now run the tests'),
+      createMessage('assistant', 'FINAL_ASSISTANT_RESPONSE: Running tests now'),
+    ]
+
+    // Use default budgets — everything should fit
+    const results = runHandleSteps(messages, 250000, 200000)
+    const resultMessages = results[0].input.messages
+    expect(resultMessages).toHaveLength(1)
+
+    const content = (resultMessages[0].content[0] as { text: string }).text
+
+    // === Structure checks ===
+    expect(content).toContain('<conversation_summary>')
+    expect(content).toContain('</conversation_summary>')
+    const summaryTagCount = (content.match(/<conversation_summary>/g) || [])
+      .length
+    expect(summaryTagCount).toBe(1)
+
+    // === Previous summary entries preserved ===
+    expect(content).toContain('OLD_USER_REQUEST_1')
+    expect(content).toContain('OLD_ASSISTANT_RESPONSE_1')
+    expect(content).toContain('OLD_USER_REQUEST_2')
+    expect(content).toContain('OLD_ASSISTANT_RESPONSE_2')
+
+    // === Long user message: truncated with 80/20 split ===
+    expect(content).toContain('LONG_USER_START_')
+    expect(content).not.toContain('_LONG_USER_MIDDLE_MARKER_') // Middle marker falls in truncated gap
+    expect(content).toContain('[...truncated')
+
+    // === Long assistant text: truncated ===
+    expect(content).toContain('LONG_ASSISTANT_START_')
+    expect(content).not.toContain('_LONG_ASST_MIDDLE_MARKER_') // Middle marker falls in truncated gap
+
+    // === Tool call summaries present ===
+    expect(content).toContain(
+      'inspected files: src/model.ts, src/service.ts',
+    )
+    expect(content).toContain('edited file: src/model.ts')
+    expect(content).toContain('delegated agents:')
+
+    // === str_replace result: present but truncated at 2k chars ===
+    expect(content).toContain('Edit result from str_replace:')
+    expect(content).toContain('DIFF_START_MARKER_')
+    expect(content).not.toContain('_DIFF_END_MARKER') // Truncated by 2k result limit
+
+    // === spawn_agents tool entry: truncated by TOOL_ENTRY_LIMIT ===
+    expect(content).toContain('AGENT_0_OUTPUT_START_') // First agent's start in 80% prefix
+    expect(content).not.toContain('AGENT_4_OUTPUT_START_') // Last agent's start falls in truncated gap
+
+    // === Final messages present ===
+    expect(content).toContain('FINAL_USER_REQUEST')
+    expect(content).toContain('FINAL_ASSISTANT_RESPONSE')
+
+    // === Entries are separated by --- ===
+    expect(content).toContain('---')
+  })
+
+  test('with tight budgets, drops old summary entries while keeping truncated new entries', () => {
+    // Same setup but with tight budgets: old summary entries get dropped,
+    // new entries survive (individually truncated)
+    const previousSummary: Message = {
+      role: 'user',
+      content: [
+        {
+          type: 'text',
+          text: `<conversation_summary>\nThis is a summary of the conversation so far. The original messages have been condensed to save context space.\n\n[USER]\nOLD_DROPPED_USER: ${'X'.repeat(600)}\n\n---\n\n[ASSISTANT]\nOLD_DROPPED_ASSISTANT: ${'Y'.repeat(600)}\n\n---\n\n[USER]\nOLD_DROPPED_USER_2: Asked about deployment\n\n---\n\n[ASSISTANT]\nOLD_DROPPED_ASSISTANT_2: ${'Explained deployment process. '.repeat(80)}\n</conversation_summary>`,
+        },
+      ],
+    }
+
+    // Long user message (~12k chars, under truncation limit but uses significant budget)
+    const longUserMessage =
+      'SURVIVED_USER_START_' +
+      'Feature request details. '.repeat(400) +
+      '_SURVIVED_USER_END'
+
+    // Assistant with tool calls
+    const assistantMsg: Message = {
+      role: 'assistant',
+      content: [
+        { type: 'text', text: 'SURVIVED_ASSISTANT: Working on it' },
+        {
+          type: 'tool-call',
+          toolCallId: 'call-1',
+          toolName: 'str_replace',
+          input: { path: 'src/app.ts', replacements: [] },
+        },
+      ],
+    }
+
+    // Tool result with a diff
+    const toolResult = createToolResultMessage('call-1', 'str_replace', {
+      file: 'src/app.ts',
+      message: 'Updated file',
+      unifiedDiff:
+        '--- a/src/app.ts\n+++ b/src/app.ts\n@@ -1 +1 @@\n-old\n+SURVIVED_DIFF_CONTENT',
+    })
+
+    const messages: Message[] = [
+      previousSummary,
+      createMessage('user', longUserMessage),
+      assistantMsg,
+      toolResult,
+      createMessage('user', 'SURVIVED_FINAL_USER'),
+      createMessage('assistant', 'SURVIVED_FINAL_ASSISTANT'),
+    ]
+
+    // Tight budgets: enough for new entries but not old summary entries
+    // New assistant entries: ~25 (assistant text+tool) + ~56 (edit result JSON) + ~13 (final) = ~94 tokens
+    // Old assistant entries: ~20 for OLD_DROPPED_ASSISTANT_2 would push over budget of 100
+    const results = runHandleSteps(messages, 250000, 200000, {
+      assistantToolBudget: 400,
+      userBudget: 3400,
+    })
+
+    const resultMessages = results[0].input.messages
+    expect(resultMessages).toHaveLength(1)
+
+    const content = (resultMessages[0].content[0] as { text: string }).text
+
+    // === New entries survived ===
+    expect(content).toContain('SURVIVED_USER_START_')
+    expect(content).toContain('SURVIVED_ASSISTANT')
+    expect(content).toContain('SURVIVED_DIFF_CONTENT')
+    expect(content).toContain('SURVIVED_FINAL_USER')
+    expect(content).toContain('SURVIVED_FINAL_ASSISTANT')
+
+    // === Old summary entries dropped by budget walk ===
+    expect(content).not.toContain('OLD_DROPPED_USER:')
+    expect(content).not.toContain('OLD_DROPPED_ASSISTANT:')
+    expect(content).not.toContain('OLD_DROPPED_USER_2:')
+    expect(content).not.toContain('OLD_DROPPED_ASSISTANT_2:')
+  })
+
+  test('fully includes conversation summary when it fits within user budget', () => {
+    const previousSummary: Message = {
+      role: 'user',
+      content: [
+        {
+          type: 'text',
+          text: `<conversation_summary>\nThis is a summary of the conversation so far. The original messages have been condensed to save context space.\n\n[USER]\nOld request about feature A\n\n---\n\n[ASSISTANT]\nWorked on feature A\n</conversation_summary>`,
+        },
+      ],
+    }
+
+    const messages: Message[] = [
+      previousSummary,
+      createMessage('user', 'New request about feature B'),
+      createMessage('assistant', 'Working on feature B'),
+    ]
+
+    // Large budget — everything fits
+    const results = runHandleSteps(messages, 250000, 200000, {
+      assistantToolBudget: 20000,
+      userBudget: 50000,
+    })
+
+    const resultMessages = results[0].input.messages
+    expect(resultMessages).toHaveLength(1)
+
+    const content = (resultMessages[0].content[0] as { text: string }).text
+    // Previous summary content should be fully included
+    expect(content).toContain('Old request about feature A')
+    expect(content).toContain('Worked on feature A')
+    // New messages should also be included
+    expect(content).toContain('New request about feature B')
+    expect(content).toContain('Working on feature B')
   })
 })

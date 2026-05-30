@@ -10,13 +10,11 @@ import { useLoginPolling } from '../hooks/use-login-polling'
 import { useLogo } from '../hooks/use-logo'
 import { useSheenAnimation } from '../hooks/use-sheen-animation'
 import { useTheme } from '../hooks/use-theme'
-import {
-  formatUrl,
-  generateFingerprintId,
-  calculateResponsiveLayout,
-} from '../login/utils'
+import { formatUrl, calculateResponsiveLayout } from '../login/utils'
 import { useLoginStore } from '../state/login-store'
+import { IS_FREEBUFF } from '../utils/constants'
 import { copyTextToClipboard, isRemoteSession } from '../utils/clipboard'
+import { getFingerprintId } from '../utils/fingerprint'
 import { logger } from '../utils/logger'
 import { getLogoBlockColor, getLogoAccentColor } from '../utils/theme-system'
 
@@ -39,6 +37,7 @@ export const LoginModal = ({
     loginUrl,
     loading,
     error,
+    fingerprintId,
     fingerprintHash,
     expiresAt,
     isWaitingForEnter,
@@ -48,6 +47,7 @@ export const LoginModal = ({
     setLoginUrl,
     setLoading,
     setError,
+    setFingerprintId,
     setFingerprintHash,
     setExpiresAt,
     setIsWaitingForEnter,
@@ -57,9 +57,6 @@ export const LoginModal = ({
     setJustCopied,
     setHasClickedLink,
   } = useLoginStore()
-
-  // Generate fingerprint ID (only once on mount)
-  const [fingerprintId] = useState(() => generateFingerprintId())
 
   // Track hover state for copy button
   const [isCopyButtonHovered, setIsCopyButtonHovered] = useState(false)
@@ -110,17 +107,22 @@ export const LoginModal = ({
     setLoading(true)
     setError(null)
 
-    fetchLoginUrlMutation.mutate(fingerprintId, {
+    // Near-instant after the prefetch in initializeApp; falls back to the
+    // sync legacy fingerprint if hardware hashing fails.
+    const id = await getFingerprintId()
+    setFingerprintId(id)
+
+    fetchLoginUrlMutation.mutate(id, {
       onSettled: () => {
         setLoading(false)
       },
     })
   }, [
-    fingerprintId,
     loading,
     hasOpenedBrowser,
     setLoading,
     setError,
+    setFingerprintId,
     fetchLoginUrlMutation,
   ])
 
@@ -442,7 +444,7 @@ export const LoginModal = ({
                   <span fg={theme.secondary}>
                     Tip: Can't copy? Exit and run{' '}
                   </span>
-                  <span fg={theme.primary}>codebuff login</span>
+                  <span fg={theme.primary}>{IS_FREEBUFF ? 'freebuff' : 'codebuff'} login</span>
                   <span fg={theme.secondary}>
                     {' '}instead.
                   </span>
